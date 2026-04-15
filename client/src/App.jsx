@@ -370,7 +370,10 @@ export default function App() {
           <div className="bg-white rounded-xl border p-12 text-center">
             <p className="text-4xl mb-3">🔭</p>
             <p className="text-lg font-medium text-gray-700">还没有监控任务</p>
-            <p className="text-sm text-gray-400 mt-1">点击「添加监控」开始盯着你关心的网页</p>
+            <p className="text-sm text-gray-400 mt-1 mb-4">试试添加一个你经常刷的网页，比如竞品官网、招聘页面、行业论坛</p>
+            <button onClick={() => setShowAdd(true)} className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
+              + 添加第一个监控
+            </button>
           </div>
         ) : (
           <div className="space-y-2">

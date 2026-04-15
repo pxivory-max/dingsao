@@ -118,6 +118,56 @@ function ChangeDetailDialog({ change, onClose }) {
   )
 }
 
+// --- Settings Dialog ---
+function SettingsDialog({ open, onClose }) {
+  const [webhook, setWebhook] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    if (open) {
+      fetch(`${API}/settings`).then(r => r.json()).then(d => {
+        if (d.success) setWebhook(d.data.feishu_webhook || '')
+      })
+    }
+  }, [open])
+
+  if (!open) return null
+
+  const handleSave = async () => {
+    setLoading(true)
+    await fetch(`${API}/settings`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'feishu_webhook', value: webhook })
+    })
+    setLoading(false)
+    setSaved(true)
+    setTimeout(() => setSaved(false), 2000)
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <h2 className="text-lg font-bold mb-4">⚙️ 设置</h2>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">飞书 Webhook URL</label>
+            <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" value={webhook} onChange={e => setWebhook(e.target.value)} />
+            <p className="text-xs text-gray-400 mt-1">配置后，监控到变化会自动发送飞书通知</p>
+          </div>
+        </div>
+        <div className="flex gap-2 pt-4">
+          <button onClick={onClose} className="flex-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
+          <button onClick={handleSave} disabled={loading} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+            {saved ? '✅ 已保存' : loading ? '保存中...' : '保存'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // --- Monitor Detail View ---
 function MonitorDetail({ monitor, onBack }) {
   const [changes, setChanges] = useState([])
@@ -200,6 +250,7 @@ export default function App() {
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
   const [selectedMonitor, setSelectedMonitor] = useState(null)
 
   useEffect(() => { loadData() }, [])
@@ -241,9 +292,12 @@ export default function App() {
             <h1 className="text-2xl font-bold flex items-center gap-2">🔭 盯梢</h1>
             <p className="text-sm text-gray-500 mt-0.5">AI 信息雷达 — 帮你盯着互联网的变化</p>
           </div>
-          <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
-            + 添加监控
-          </button>
+          <div className="flex gap-2">
+            <button onClick={() => setShowSettings(true)} className="px-3 py-2 border rounded-lg text-sm hover:bg-gray-50" title="设置">⚙️</button>
+            <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
+              + 添加监控
+            </button>
+          </div>
         </div>
 
         {/* Stats */}
@@ -296,6 +350,7 @@ export default function App() {
         )}
       </div>
       <AddMonitorDialog open={showAdd} onClose={() => setShowAdd(false)} onCreated={() => loadData()} />
+      <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
     </div>
   )
 }

@@ -136,6 +136,36 @@ function contentChanged(oldContent, newContent) {
   return true;
 }
 
+async function sendNotification(monitor, summary) {
+  // Feishu webhook notification
+  const webhookUrl = db.prepare(`SELECT value FROM settings WHERE key = 'feishu_webhook'`).get()?.value;
+  if (!webhookUrl) return;
+  try {
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        msg_type: 'interactive',
+        card: {
+          header: {
+            title: { tag: 'plain_text', content: `🚨 ${monitor.name} 发生变化` },
+            template: 'orange'
+          },
+          elements: [
+            { tag: 'markdown', content: `**监控对象：** ${monitor.name}\n**网址：** ${monitor.url}\n\n**AI 摘要：**\n${summary}` },
+            { tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '查看网页' }, url: monitor.url, type: 'primary' }] }
+          ]
+        }
+      })
+    });
+    // Mark change as notified
+    db.prepare(`UPDATE changes SET notified = 1 WHERE monitor_id = ? AND notified = 0`).run(monitor.id);
+    console.log(`[通知] 已发送飞书通知: ${monitor.name}`);
+  } catch (e) {
+    console.error(`[通知] 飞书发送失败:`, e.message);
+  }
+}
+
 async function checkMonitor(monitor) {
   const updateStmt = db.prepare(`UPDATE monitors SET last_check_at = datetime('now'), updated_at = datetime('now'), status = ?, error_message = ?, last_content = ? WHERE id = ?`);
   try {
@@ -162,7 +192,8 @@ async function checkMonitor(monitor) {
     );
     updateStmt.run('active', null, newContent, monitor.id);
     console.log(`[${monitor.name}] 检测到变化: ${summary.substring(0, 100)}`);
-    // TODO: send notification
+    // Send notification
+    await sendNotification(monitor, summary);
   } catch (e) {
     updateStmt.run('error', e.message, monitor.last_content, monitor.id);
     console.error(`[${monitor.name}] 抓取失败:`, e.message);
@@ -259,6 +290,21 @@ app.get('/api/changes/:id', (req, res) => {
   const change = db.prepare('SELECT * FROM changes WHERE id = ?').get(req.params.id);
   if (!change) return res.status(404).json(fail('变化记录不存在'));
   res.json(ok(change));
+});
+
+// Settings
+app.get('/api/settings', (req, res) => {
+  const rows = db.prepare('SELECT * FROM settings').all();
+  const settings = {};
+  for (const r of rows) settings[r.key] = r.value;
+  res.json(ok(settings));
+});
+
+app.put('/api/settings', (req, res) => {
+  const { key, value } = req.body;
+  if (!key) return res.status(400).json(fail('key 必填'));
+  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value || '');
+  res.json(ok({ [key]: value }));
 });
 
 // Stats

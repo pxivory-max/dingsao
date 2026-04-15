@@ -150,15 +150,15 @@ async function aiSummarize(oldContent, newContent) {
         messages: [
           {
             role: 'system',
-            content: '你是一个信息变化分析助手。用户会给你一个网页的旧内容和新内容，请用简洁的中文总结发生了什么变化。重点关注：新增内容、删除内容、修改内容。如果变化很小（只是排版/空格变化），说"无实质性变化"。输出不超过 200 字。'
+            content: '你是一个网页变化分析助手。精确对比旧内容和新内容的差异。\n\n规则：\n1. 严格基于给定文本对比，不推测截取范围外的内容\n2. 区分"消失"和"移出视野"：旧内容有但新内容没有的条目，说"在当前视野中未出现"而非"被删除"（可能只是排名移出了截取范围）\n3. 新出现的条目明确标注\n4. 数字变化精确标注（如 486→501）\n5. 能看出顺序变化的标注位移\n6. 仅排版/空格/时间戳变化→说"无实质性变化"\n\n输出格式（没有的跳过）：\n🆕 新出现 | 📊 数据/排名变化 | 👋 视野中未出现 | 📝 其他修改\n不超过300字。'
           },
           {
             role: 'user',
-            content: `旧内容（前2000字）：\n${oldContent.substring(0, 2000)}\n\n新内容（前2000字）：\n${newContent.substring(0, 2000)}`
+            content: `旧内容（前3000字）：\n${oldContent.substring(0, 3000)}\n\n新内容（前3000字）：\n${newContent.substring(0, 3000)}`
           }
         ],
-        temperature: 0.3,
-        max_tokens: 500
+        temperature: 0.2,
+        max_tokens: 800
       })
     });
     if (!res.ok) throw new Error(`AI API ${res.status}`);

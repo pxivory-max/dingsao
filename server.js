@@ -7,6 +7,7 @@ const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const path = require('path');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 
 const app = express();
 app.use(cors());
@@ -46,9 +47,64 @@ db.exec(`
   );
 `);
 
+// --- Users table ---
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now'))
+  );
+`);
+
 // --- Schema Migrations ---
 try { db.exec(`ALTER TABLE monitors ADD COLUMN keywords TEXT`); } catch(e) { /* column already exists */ }
 try { db.exec(`ALTER TABLE changes ADD COLUMN filtered INTEGER DEFAULT 0`); } catch(e) { /* column already exists */ }
+try { db.exec(`ALTER TABLE monitors ADD COLUMN user_id INTEGER DEFAULT NULL`); } catch(e) { /* column already exists */ }
+try { db.exec(`ALTER TABLE settings ADD COLUMN user_id INTEGER DEFAULT NULL`); } catch(e) { /* column already exists */ }
+
+// --- JWT & Auth Helpers ---
+const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
+
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password, stored) {
+  const [salt, hash] = stored.split(':');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(derived, 'hex'));
+}
+
+function createToken(payload) {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600 })).toString('base64url');
+  const sig = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
+  return `${header}.${body}.${sig}`;
+}
+
+function verifyToken(token) {
+  try {
+    const [header, body, sig] = token.split('.');
+    const expected = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
+    if (sig !== expected) return null;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString());
+    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    return payload;
+  } catch { return null; }
+}
+
+function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json(fail('未登录'));
+  const payload = verifyToken(auth.slice(7));
+  if (!payload) return res.status(401).json(fail('登录已过期，请重新登录'));
+  req.user = payload;
+  next();
+}
 
 // --- Helpers ---
 const ok = (data) => ({ success: true, data });
@@ -202,12 +258,15 @@ function contentChanged(oldContent, newContent) {
 }
 
 // --- Notification Helpers ---
-function getSetting(key) {
+function getSetting(key, userId) {
+  if (userId) {
+    return db.prepare(`SELECT value FROM settings WHERE key = ? AND user_id = ?`).get(key, userId)?.value || '';
+  }
   return db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key)?.value || '';
 }
 
 async function sendFeishuNotification(monitor, summary) {
-  const webhookUrl = getSetting('feishu_webhook');
+  const webhookUrl = getSetting('feishu_webhook', monitor.user_id);
   if (!webhookUrl) return;
   try {
     const res = await fetch(webhookUrl, {
@@ -235,7 +294,7 @@ async function sendFeishuNotification(monitor, summary) {
 }
 
 async function sendWebhookNotification(monitor, summary) {
-  const webhookUrl = getSetting('webhook_url');
+  const webhookUrl = getSetting('webhook_url', monitor.user_id);
   if (!webhookUrl) return;
   try {
     const res = await fetch(webhookUrl, {
@@ -256,11 +315,11 @@ async function sendWebhookNotification(monitor, summary) {
 }
 
 async function sendEmailNotification(monitor, summary) {
-  const emailTo = getSetting('email_to');
-  const smtpHost = getSetting('smtp_host');
-  const smtpPort = getSetting('smtp_port') || '587';
-  const smtpUser = getSetting('smtp_user');
-  const smtpPass = getSetting('smtp_pass');
+  const emailTo = getSetting('email_to', monitor.user_id);
+  const smtpHost = getSetting('smtp_host', monitor.user_id);
+  const smtpPort = getSetting('smtp_port', monitor.user_id) || '587';
+  const smtpUser = getSetting('smtp_user', monitor.user_id);
+  const smtpPass = getSetting('smtp_pass', monitor.user_id);
   if (!emailTo || !smtpHost || !smtpUser || !smtpPass) return;
   try {
     const transporter = nodemailer.createTransport({
@@ -293,7 +352,7 @@ async function sendNotification(monitor, summary) {
     sendEmailNotification(monitor, summary)
   ]);
   // Mark changes as notified if any notification was attempted
-  const anyConfigured = getSetting('feishu_webhook') || getSetting('webhook_url') || getSetting('email_to');
+  const anyConfigured = getSetting('feishu_webhook', monitor.user_id) || getSetting('webhook_url', monitor.user_id) || getSetting('email_to', monitor.user_id);
   if (anyConfigured) {
     db.prepare(`UPDATE changes SET notified = 1 WHERE monitor_id = ? AND notified = 0`).run(monitor.id);
   }
@@ -365,10 +424,48 @@ const checkSchedule = () => {
 // Run scheduler every minute
 cron.schedule('* * * * *', checkSchedule);
 
-// --- API Routes ---
+// --- Auth API Routes ---
+
+app.post('/api/auth/register', (req, res) => {
+  const { email, password, name } = req.body;
+  if (!email || !password || !name) return res.status(400).json(fail('email、password、name 必填'));
+  if (password.length < 6) return res.status(400).json(fail('密码至少 6 位'));
+  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email);
+  if (existing) return res.status(400).json(fail('该邮箱已注册'));
+  const password_hash = hashPassword(password);
+  const result = db.prepare('INSERT INTO users (email, password_hash, name) VALUES (?, ?, ?)').run(email, password_hash, name);
+  const userId = result.lastInsertRowid;
+  // First user inherits existing monitors and settings that have no user_id
+  db.prepare('UPDATE monitors SET user_id = ? WHERE user_id IS NULL').run(userId);
+  db.prepare('UPDATE settings SET user_id = ? WHERE user_id IS NULL').run(userId);
+  const token = createToken({ id: userId, email, name });
+  res.json(ok({ token, user: { id: userId, email, name } }));
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json(fail('email 和 password 必填'));
+  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  if (!user) return res.status(401).json(fail('邮箱或密码错误'));
+  try {
+    if (!verifyPassword(password, user.password_hash)) return res.status(401).json(fail('邮箱或密码错误'));
+  } catch {
+    return res.status(401).json(fail('邮箱或密码错误'));
+  }
+  const token = createToken({ id: user.id, email: user.email, name: user.name });
+  res.json(ok({ token, user: { id: user.id, email: user.email, name: user.name } }));
+});
+
+app.get('/api/auth/me', authMiddleware, (req, res) => {
+  const user = db.prepare('SELECT id, email, name, created_at FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(401).json(fail('用户不存在'));
+  res.json(ok(user));
+});
+
+// --- API Routes (protected) ---
 
 // Create monitor
-app.post('/api/monitors', (req, res) => {
+app.post('/api/monitors', authMiddleware, (req, res) => {
   const { name, url, selector, frequency, keywords } = req.body;
   if (!name || !url) return res.status(400).json(fail('name 和 url 必填'));
   try {
@@ -376,8 +473,8 @@ app.post('/api/monitors', (req, res) => {
   } catch {
     return res.status(400).json(fail('无效的 URL'));
   }
-  const result = db.prepare('INSERT INTO monitors (name, url, selector, frequency, keywords) VALUES (?, ?, ?, ?, ?)').run(
-    name, url, selector || null, frequency || 60, keywords || null
+  const result = db.prepare('INSERT INTO monitors (name, url, selector, frequency, keywords, user_id) VALUES (?, ?, ?, ?, ?, ?)').run(
+    name, url, selector || null, frequency || 60, keywords || null, req.user.id
   );
   const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(result.lastInsertRowid);
   // Trigger first check immediately
@@ -385,16 +482,16 @@ app.post('/api/monitors', (req, res) => {
   res.json(ok(monitor));
 });
 
-// List monitors
-app.get('/api/monitors', (req, res) => {
-  const monitors = db.prepare('SELECT id, name, url, selector, frequency, keywords, last_check_at, status, error_message, created_at, updated_at FROM monitors ORDER BY created_at DESC').all();
+// List monitors (scoped to user)
+app.get('/api/monitors', authMiddleware, (req, res) => {
+  const monitors = db.prepare('SELECT id, name, url, selector, frequency, keywords, last_check_at, status, error_message, created_at, updated_at FROM monitors WHERE user_id = ? ORDER BY created_at DESC').all(req.user.id);
   res.json(ok(monitors));
 });
 
-// Update monitor
-app.put('/api/monitors/:id', (req, res) => {
+// Update monitor (scoped to user)
+app.put('/api/monitors/:id', authMiddleware, (req, res) => {
   const { name, url, selector, frequency, status, keywords } = req.body;
-  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id);
+  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!monitor) return res.status(404).json(fail('监控不存在'));
   db.prepare(`UPDATE monitors SET name = ?, url = ?, selector = ?, frequency = ?, status = ?, keywords = ?, updated_at = datetime('now') WHERE id = ?`).run(
     name || monitor.name, url || monitor.url, selector !== undefined ? selector : monitor.selector,
@@ -403,18 +500,18 @@ app.put('/api/monitors/:id', (req, res) => {
   res.json(ok(db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id)));
 });
 
-// Delete monitor
-app.delete('/api/monitors/:id', (req, res) => {
-  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id);
+// Delete monitor (scoped to user)
+app.delete('/api/monitors/:id', authMiddleware, (req, res) => {
+  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!monitor) return res.status(404).json(fail('监控不存在'));
   db.prepare('DELETE FROM changes WHERE monitor_id = ?').run(req.params.id);
   db.prepare('DELETE FROM monitors WHERE id = ?').run(req.params.id);
   res.json(ok({ deleted: true }));
 });
 
-// Manual check
-app.post('/api/monitors/:id/check', async (req, res) => {
-  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id);
+// Manual check (scoped to user)
+app.post('/api/monitors/:id/check', authMiddleware, async (req, res) => {
+  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!monitor) return res.status(404).json(fail('监控不存在'));
   try {
     await checkMonitor(monitor);
@@ -425,9 +522,9 @@ app.post('/api/monitors/:id/check', async (req, res) => {
   }
 });
 
-// Get changes for a monitor
-app.get('/api/monitors/:id/changes', (req, res) => {
-  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id);
+// Get changes for a monitor (scoped to user)
+app.get('/api/monitors/:id/changes', authMiddleware, (req, res) => {
+  const monitor = db.prepare('SELECT * FROM monitors WHERE id = ? AND user_id = ?').get(req.params.id, req.user.id);
   if (!monitor) return res.status(404).json(fail('监控不存在'));
   const limit = parseInt(req.query.limit) || 50;
   const showAll = req.query.all === '1';
@@ -439,36 +536,40 @@ app.get('/api/monitors/:id/changes', (req, res) => {
   res.json(ok({ monitor: { id: monitor.id, name: monitor.name, url: monitor.url }, changes, totalChanges, filteredChanges }));
 });
 
-// Get single change detail
-app.get('/api/changes/:id', (req, res) => {
-  const change = db.prepare('SELECT * FROM changes WHERE id = ?').get(req.params.id);
+// Get single change detail (scoped to user via monitor)
+app.get('/api/changes/:id', authMiddleware, (req, res) => {
+  const change = db.prepare('SELECT c.* FROM changes c JOIN monitors m ON c.monitor_id = m.id WHERE c.id = ? AND m.user_id = ?').get(req.params.id, req.user.id);
   if (!change) return res.status(404).json(fail('变化记录不存在'));
   res.json(ok(change));
 });
 
-// Settings
-app.get('/api/settings', (req, res) => {
-  const rows = db.prepare('SELECT * FROM settings').all();
+// Settings (scoped to user)
+app.get('/api/settings', authMiddleware, (req, res) => {
+  const rows = db.prepare('SELECT * FROM settings WHERE user_id = ?').all(req.user.id);
   const settings = {};
   for (const r of rows) settings[r.key] = r.value;
   res.json(ok(settings));
 });
 
-app.put('/api/settings', (req, res) => {
+app.put('/api/settings', authMiddleware, (req, res) => {
   const { key, value } = req.body;
   if (!key) return res.status(400).json(fail('key 必填'));
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value || '');
+  // Use composite unique: delete old then insert
+  db.prepare('DELETE FROM settings WHERE key = ? AND user_id = ?').run(key, req.user.id);
+  db.prepare('INSERT INTO settings (key, value, user_id) VALUES (?, ?, ?)').run(key, value || '', req.user.id);
   res.json(ok({ [key]: value }));
 });
 
-// Batch settings update
-app.post('/api/settings/batch', (req, res) => {
+// Batch settings update (scoped to user)
+app.post('/api/settings/batch', authMiddleware, (req, res) => {
   const { settings } = req.body;
   if (!settings || typeof settings !== 'object') return res.status(400).json(fail('settings 对象必填'));
-  const upsert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+  const del = db.prepare('DELETE FROM settings WHERE key = ? AND user_id = ?');
+  const ins = db.prepare('INSERT INTO settings (key, value, user_id) VALUES (?, ?, ?)');
   const saveMany = db.transaction((items) => {
     for (const [key, value] of Object.entries(items)) {
-      upsert.run(key, value || '');
+      del.run(key, req.user.id);
+      ins.run(key, value || '', req.user.id);
     }
   });
   saveMany(settings);
@@ -476,21 +577,21 @@ app.post('/api/settings/batch', (req, res) => {
 });
 
 // Test notification endpoint
-app.post('/api/settings/test-notification', async (req, res) => {
+app.post('/api/settings/test-notification', authMiddleware, async (req, res) => {
   const { type } = req.body; // 'feishu' | 'webhook' | 'email'
-  const testMonitor = { id: 0, name: '测试监控', url: 'https://example.com' };
+  const testMonitor = { id: 0, name: '测试监控', url: 'https://example.com', user_id: req.user.id };
   const testSummary = '🧪 这是一条测试通知，说明你的通知配置正确！';
   try {
     if (type === 'feishu') {
-      const url = getSetting('feishu_webhook');
+      const url = getSetting('feishu_webhook', req.user.id);
       if (!url) return res.status(400).json(fail('请先配置飞书 Webhook URL'));
       await sendFeishuNotification(testMonitor, testSummary);
     } else if (type === 'webhook') {
-      const url = getSetting('webhook_url');
+      const url = getSetting('webhook_url', req.user.id);
       if (!url) return res.status(400).json(fail('请先配置 Webhook URL'));
       await sendWebhookNotification(testMonitor, testSummary);
     } else if (type === 'email') {
-      const emailTo = getSetting('email_to');
+      const emailTo = getSetting('email_to', req.user.id);
       if (!emailTo) return res.status(400).json(fail('请先配置收件邮箱'));
       await sendEmailNotification(testMonitor, testSummary);
     } else {

@@ -1,7 +1,20 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import './index.css'
 
 const API = '/api'
+
+// --- Auth helpers ---
+function getToken() { return localStorage.getItem('dingsao_token') }
+function setToken(t) { if (t) localStorage.setItem('dingsao_token', t); else localStorage.removeItem('dingsao_token') }
+function authHeaders() {
+  const t = getToken()
+  return t ? { 'Content-Type': 'application/json', Authorization: `Bearer ${t}` } : { 'Content-Type': 'application/json' }
+}
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(`${API}${path}`, { ...opts, headers: { ...authHeaders(), ...opts.headers } })
+  if (res.status === 401) { setToken(null); window.location.reload(); return null }
+  return res.json()
+}
 
 // Lightweight visit tracking
 try { fetch(`${API}/track`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: location.pathname }) }).catch(() => {}) } catch(e) {}
@@ -19,6 +32,75 @@ function StatusBadge({ status }) {
     error: 'bg-red-100 text-red-700'
   }
   return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[status] || 'bg-gray-100'}`}>{status}</span>
+}
+
+// --- Auth Page ---
+function AuthPage({ onLogin }) {
+  const [mode, setMode] = useState('login')
+  const [form, setForm] = useState({ email: '', password: '', name: '' })
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    try {
+      const endpoint = mode === 'login' ? '/auth/login' : '/auth/register'
+      const body = mode === 'login' ? { email: form.email, password: form.password } : form
+      const res = await fetch(`${API}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+      const data = await res.json()
+      if (!data.success) throw new Error(data.error)
+      setToken(data.data.token)
+      onLogin(data.data.user)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white flex items-center justify-center px-4">
+      <div className="w-full max-w-sm">
+        <div className="text-center mb-8">
+          <div className="text-5xl mb-3">🔭</div>
+          <h1 className="text-2xl font-bold text-gray-900">盯梢</h1>
+          <p className="text-sm text-gray-500 mt-1">AI 信息雷达</p>
+        </div>
+        <div className="bg-white rounded-xl border shadow-sm p-6">
+          <div className="flex mb-5 border-b">
+            <button onClick={() => { setMode('login'); setError('') }} className={`flex-1 pb-2 text-sm font-medium border-b-2 transition-colors ${mode === 'login' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>登录</button>
+            <button onClick={() => { setMode('register'); setError('') }} className={`flex-1 pb-2 text-sm font-medium border-b-2 transition-colors ${mode === 'register' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-400 hover:text-gray-600'}`}>注册</button>
+          </div>
+          <form onSubmit={handleSubmit} className="space-y-3">
+            {mode === 'register' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">名称</label>
+                <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="你的名称" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
+              </div>
+            )}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">邮箱</label>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="email@example.com" type="email" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} required />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder={mode === 'register' ? '至少 6 位' : '密码'} type="password" value={form.password} onChange={e => setForm({ ...form, password: e.target.value })} required minLength={mode === 'register' ? 6 : undefined} />
+            </div>
+            {error && <p className="text-red-500 text-sm">{error}</p>}
+            <button type="submit" disabled={loading} className="w-full py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+              {loading ? '请稍候...' : mode === 'login' ? '登录' : '注册'}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // --- Add Monitor Dialog ---
@@ -49,15 +131,10 @@ function AddMonitorDialog({ open, onClose, onCreated, editMonitor }) {
     setLoading(true)
     setError('')
     try {
-      const url = isEdit ? `${API}/monitors/${editMonitor.id}` : `${API}/monitors`
+      const url = isEdit ? `/monitors/${editMonitor.id}` : `/monitors`
       const method = isEdit ? 'PUT' : 'POST'
-      const res = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form)
-      })
-      const data = await res.json()
-      if (!data.success) throw new Error(data.error)
+      const data = await apiFetch(url, { method, body: JSON.stringify(form) })
+      if (!data || !data.success) throw new Error(data?.error || '请求失败')
       onCreated(data.data)
       setForm({ name: '', url: '', selector: '', frequency: 60, keywords: '' })
       onClose()
@@ -154,8 +231,8 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
 
   useEffect(() => {
     if (open) {
-      fetch(`${API}/settings`).then(r => r.json()).then(d => {
-        if (d.success) setSettings(d.data || {})
+      apiFetch('/settings').then(d => {
+        if (d && d.success) setSettings(d.data || {})
       })
       setSaved(false)
       setTestResult(null)
@@ -168,9 +245,8 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
 
   const handleSave = async () => {
     setLoading(true)
-    await fetch(`${API}/settings/batch`, {
+    await apiFetch('/settings/batch', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ settings })
     })
     setLoading(false)
@@ -184,18 +260,15 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
     setTestResult(null)
     try {
       // Save first
-      await fetch(`${API}/settings/batch`, {
+      await apiFetch('/settings/batch', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings })
       })
-      const res = await fetch(`${API}/settings/test-notification`, {
+      const data = await apiFetch('/settings/test-notification', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type })
       })
-      const data = await res.json()
-      setTestResult(data.success ? { ok: true, msg: '✅ 发送成功！' } : { ok: false, msg: data.error || '发送失败' })
+      setTestResult(data && data.success ? { ok: true, msg: '✅ 发送成功！' } : { ok: false, msg: data?.error || '发送失败' })
     } catch (e) {
       setTestResult({ ok: false, msg: e.message })
     } finally {
@@ -378,9 +451,8 @@ function MonitorDetail({ monitor, onBack, onEdit }) {
   const loadChanges = async () => {
     setLoading(true)
     const qs = showAll ? '?all=1' : ''
-    const res = await fetch(`${API}/monitors/${monitor.id}/changes${qs}`)
-    const data = await res.json()
-    if (data.success) {
+    const data = await apiFetch(`/monitors/${monitor.id}/changes${qs}`)
+    if (data && data.success) {
       setChanges(data.data.changes)
       setTotalChanges(data.data.totalChanges ?? 0)
       setFilteredChanges(data.data.filteredChanges ?? 0)
@@ -390,15 +462,14 @@ function MonitorDetail({ monitor, onBack, onEdit }) {
 
   const triggerCheck = async () => {
     setChecking(true)
-    await fetch(`${API}/monitors/${monitor.id}/check`, { method: 'POST' })
+    await apiFetch(`/monitors/${monitor.id}/check`, { method: 'POST' })
     await loadChanges()
     setChecking(false)
   }
 
   const loadChangeDetail = async (changeId) => {
-    const res = await fetch(`${API}/changes/${changeId}`)
-    const data = await res.json()
-    if (data.success) setSelectedChange(data.data)
+    const data = await apiFetch(`/changes/${changeId}`)
+    if (data && data.success) setSelectedChange(data.data)
   }
 
   return (
@@ -467,47 +538,6 @@ function MonitorDetail({ monitor, onBack, onEdit }) {
   )
 }
 
-// --- Landing Page ---
-function LandingPage({ onEnter }) {
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white">
-      <div className="max-w-3xl mx-auto px-4 py-16 text-center">
-        <div className="text-6xl mb-6">🔭</div>
-        <h1 className="text-4xl font-bold text-gray-900 mb-3">盯梢</h1>
-        <p className="text-xl text-gray-500 mb-8">AI 信息雷达 — 帮你盯着互联网的变化</p>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12 text-left">
-          {[
-            { icon: '🌐', title: '添加网址', desc: '填入你关心的网页，比如竞品官网、招聘页、新闻站' },
-            { icon: '🤖', title: 'AI 智能监控', desc: '系统定时抓取，AI 自动识别变化并生成摘要' },
-            { icon: '🔔', title: '实时推送', desc: '有变化立刻通知你，支持飞书/邮箱推送' }
-          ].map(f => (
-            <div key={f.title} className="bg-white rounded-xl p-5 shadow-sm border">
-              <div className="text-2xl mb-2">{f.icon}</div>
-              <h3 className="font-semibold mb-1">{f.title}</h3>
-              <p className="text-sm text-gray-500">{f.desc}</p>
-            </div>
-          ))}
-        </div>
-
-        <div className="mb-12">
-          <h2 className="text-lg font-semibold text-gray-700 mb-4">适合谁用？</h2>
-          <div className="flex flex-wrap justify-center gap-3">
-            {['📊 产品经理监控竞品', '💻 开发者追踪新项目', '📈 电商盯着价格变动', '💼 求职者盯招聘岗位', '📰 研究员追踪行业动态'].map(t => (
-              <span key={t} className="bg-blue-50 text-blue-700 px-3 py-1.5 rounded-full text-sm">{t}</span>
-            ))}
-          </div>
-        </div>
-
-        <button onClick={onEnter} className="px-8 py-3 bg-blue-600 text-white rounded-xl text-lg font-medium hover:bg-blue-700 shadow-lg shadow-blue-200 transition-all">
-          开始使用 →
-        </button>
-        <p className="text-xs text-gray-400 mt-3">免费体验，无需注册</p>
-      </div>
-    </div>
-  )
-}
-
 // --- Notification Guide Banner ---
 function NotifyBanner({ onOpenSettings }) {
   return (
@@ -520,7 +550,8 @@ function NotifyBanner({ onOpenSettings }) {
 
 // --- Main App ---
 export default function App() {
-  const [entered, setEntered] = useState(() => localStorage.getItem('dingsao_entered') === '1')
+  const [user, setUser] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
   const [monitors, setMonitors] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -530,18 +561,32 @@ export default function App() {
   const [editingMonitor, setEditingMonitor] = useState(null)
   const [hasNotifyConfig, setHasNotifyConfig] = useState(true)
 
-  useEffect(() => { if (entered) loadData() }, [entered])
+  // Check token on mount
+  useEffect(() => {
+    const token = getToken()
+    if (token) {
+      apiFetch('/auth/me').then(d => {
+        if (d && d.success) setUser(d.data)
+        else setToken(null)
+        setAuthChecked(true)
+      })
+    } else {
+      setAuthChecked(true)
+    }
+  }, [])
+
+  useEffect(() => { if (user) loadData() }, [user])
 
   const loadData = async () => {
     setLoading(true)
     const [mRes, sRes, settingsRes] = await Promise.all([
-      fetch(`${API}/monitors`).then(r => r.json()),
-      fetch(`${API}/stats`).then(r => r.json()),
-      fetch(`${API}/settings`).then(r => r.json())
+      apiFetch('/monitors'),
+      apiFetch('/stats'),
+      apiFetch('/settings')
     ])
-    if (mRes.success) setMonitors(mRes.data)
-    if (sRes.success) setStats(sRes.data)
-    if (settingsRes.success) {
+    if (mRes && mRes.success) setMonitors(mRes.data)
+    if (sRes && sRes.success) setStats(sRes.data)
+    if (settingsRes && settingsRes.success) {
       const s = settingsRes.data
       setHasNotifyConfig(!!(s.feishu_webhook || s.webhook_url || s.email_to))
     }
@@ -551,12 +596,23 @@ export default function App() {
   const deleteMonitor = async (id, e) => {
     e.stopPropagation()
     if (!confirm('确定删除这个监控？')) return
-    await fetch(`${API}/monitors/${id}`, { method: 'DELETE' })
+    await apiFetch(`/monitors/${id}`, { method: 'DELETE' })
     loadData()
   }
 
-  if (!entered) {
-    return <LandingPage onEnter={() => { localStorage.setItem('dingsao_entered', '1'); setEntered(true) }} />
+  const handleLogout = () => {
+    setToken(null)
+    setUser(null)
+    setMonitors([])
+    setStats(null)
+  }
+
+  if (!authChecked) {
+    return <div className="min-h-screen flex items-center justify-center text-gray-400">加载中...</div>
+  }
+
+  if (!user) {
+    return <AuthPage onLogin={(u) => setUser(u)} />
   }
 
   if (selectedMonitor) {
@@ -579,11 +635,13 @@ export default function App() {
             <h1 className="text-2xl font-bold flex items-center gap-2">🔭 盯梢</h1>
             <p className="text-sm text-gray-500 mt-0.5">AI 信息雷达 — 帮你盯着互联网的变化</p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-gray-600">{user.name}</span>
             <button onClick={() => setShowSettings(true)} className="px-3 py-2 border rounded-lg text-sm hover:bg-gray-50" title="设置">⚙️</button>
             <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
               + 添加监控
             </button>
+            <button onClick={handleLogout} className="px-3 py-2 border rounded-lg text-sm text-gray-500 hover:bg-gray-50 hover:text-red-500" title="退出登录">退出</button>
           </div>
         </div>
 

@@ -49,14 +49,15 @@ db.exec(`
 const ok = (data) => ({ success: true, data });
 const fail = (error) => ({ success: false, error });
 
-async function fetchPage(url, selector) {
+// Lightweight HTTP fetch
+async function fetchPageLight(url, selector) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
     const res = await fetch(url, {
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; DingSao/1.0; +https://dingsao.ai)',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8'
       }
@@ -64,19 +65,72 @@ async function fetchPage(url, selector) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const html = await res.text();
     const $ = cheerio.load(html);
-    // Remove scripts, styles, nav, footer
     $('script, style, nav, footer, header, noscript, iframe').remove();
     let text;
     if (selector) {
       text = $(selector).text();
-      if (!text.trim()) text = $('body').text(); // fallback
+      if (!text.trim()) text = $('body').text();
     } else {
       text = $('body').text();
     }
-    // Normalize whitespace
     return text.replace(/\s+/g, ' ').trim().substring(0, 50000);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+// Playwright browser fetch for JS-rendered pages
+let _browser = null;
+async function getBrowser() {
+  if (!_browser || !_browser.isConnected()) {
+    const { chromium } = require('playwright');
+    _browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
+  }
+  return _browser;
+}
+
+async function fetchPageBrowser(url, selector) {
+  const browser = await getBrowser();
+  const context = await browser.newContext({
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+    locale: 'zh-CN'
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.waitForTimeout(3000); // Wait for JS rendering
+    let text;
+    if (selector) {
+      text = await page.textContent(selector).catch(() => null);
+    }
+    if (!text) {
+      text = await page.evaluate(() => {
+        ['script','style','nav','footer','header','noscript','iframe'].forEach(tag => {
+          document.querySelectorAll(tag).forEach(el => el.remove());
+        });
+        return document.body?.innerText || '';
+      });
+    }
+    return (text || '').replace(/\s+/g, ' ').trim().substring(0, 50000);
+  } finally {
+    await context.close();
+  }
+}
+
+// Smart fetch: try light first, fallback to browser if content too short
+const MIN_CONTENT_LENGTH = 100;
+async function fetchPage(url, selector) {
+  try {
+    const text = await fetchPageLight(url, selector);
+    if (text.length >= MIN_CONTENT_LENGTH) return text;
+    console.log(`[轻量抓取内容过短 (${text.length}字符)，切换浏览器渲染: ${url}]`);
+  } catch(e) {
+    console.log(`[轻量抓取失败 (${e.message})，切换浏览器渲染: ${url}]`);
+  }
+  try {
+    return await fetchPageBrowser(url, selector);
+  } catch(e) {
+    throw new Error(`抓取失败(HTTP+浏览器均失败): ${e.message}`);
   }
 }
 

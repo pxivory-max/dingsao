@@ -244,8 +244,50 @@ function MonitorDetail({ monitor, onBack }) {
   )
 }
 
+// --- Landing Page ---
+function LandingPage({ onEnter }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-blue-50 to-white">
+      <div className="max-w-3xl mx-auto px-4 py-16 text-center">
+        <div className="text-6xl mb-6">🔭</div>
+        <h1 className="text-4xl font-bold text-gray-900 mb-3">盯梢</h1>
+        <p className="text-xl text-gray-500 mb-8">AI 信息雷达 — 帮你盯着互联网的变化</p>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12 text-left">
+          {[
+            { icon: '🌐', title: '添加网址', desc: '填入你关心的网页，比如竞品官网、招聘页、新闻站' },
+            { icon: '🤖', title: 'AI 智能监控', desc: '系统定时抓取，AI 自动识别变化并生成摘要' },
+            { icon: '🔔', title: '实时推送', desc: '有变化立刻通知你，支持飞书/邮箱推送' }
+          ].map(f => (
+            <div key={f.title} className="bg-white rounded-xl p-5 shadow-sm border">
+              <div className="text-2xl mb-2">{f.icon}</div>
+              <h3 className="font-semibold mb-1">{f.title}</h3>
+              <p className="text-sm text-gray-500">{f.desc}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="mb-12">
+          <h2 className="text-lg font-semibold text-gray-700 mb-4">适合谁用？</h2>
+          <div className="flex flex-wrap justify-center gap-3">
+            {['📊 产品经理监控竞品', '💻 开发者追踪新项目', '📈 电商盯着价格变动', '💼 求职者盯招聘岗位', '📰 研究员追踪行业动态'].map(t => (
+              <span key={t} className="bg-blue-50 text-blue-700 px-3 py-1.5 rounded-full text-sm">{t}</span>
+            ))}
+          </div>
+        </div>
+
+        <button onClick={onEnter} className="px-8 py-3 bg-blue-600 text-white rounded-xl text-lg font-medium hover:bg-blue-700 shadow-lg shadow-blue-200 transition-all">
+          开始使用 →
+        </button>
+        <p className="text-xs text-gray-400 mt-3">免费体验，无需注册</p>
+      </div>
+    </div>
+  )
+}
+
 // --- Main App ---
 export default function App() {
+  const [entered, setEntered] = useState(() => localStorage.getItem('dingsao_entered') === '1')
   const [monitors, setMonitors] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -253,7 +295,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [selectedMonitor, setSelectedMonitor] = useState(null)
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => { if (entered) loadData() }, [entered])
 
   const loadData = async () => {
     setLoading(true)
@@ -271,6 +313,10 @@ export default function App() {
     if (!confirm('确定删除这个监控？')) return
     await fetch(`${API}/monitors/${id}`, { method: 'DELETE' })
     loadData()
+  }
+
+  if (!entered) {
+    return <LandingPage onEnter={() => { localStorage.setItem('dingsao_entered', '1'); setEntered(true) }} />
   }
 
   if (selectedMonitor) {

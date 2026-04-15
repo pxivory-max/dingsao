@@ -511,6 +511,22 @@ app.get('/api/stats', (req, res) => {
   res.json(ok({ totalMonitors, activeMonitors, totalChanges, recentChanges }));
 });
 
+// Visit tracking (lightweight)
+try { db.exec(`CREATE TABLE IF NOT EXISTS visits (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT, path TEXT, ua TEXT, ts TEXT DEFAULT (datetime('now')))`); } catch(e) {}
+app.post('/api/track', (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.ip;
+  const { path: p } = req.body;
+  try { db.prepare('INSERT INTO visits (ip, path, ua) VALUES (?, ?, ?)').run(ip || '', p || '/', (req.headers['user-agent'] || '').substring(0, 200)); } catch(e) {}
+  res.json(ok({ tracked: true }));
+});
+app.get('/api/visits/stats', (req, res) => {
+  const total = db.prepare('SELECT COUNT(*) as c FROM visits').get().c;
+  const today = db.prepare(`SELECT COUNT(*) as c FROM visits WHERE ts > datetime('now', '-24 hours')`).get().c;
+  const uniqueIPs = db.prepare('SELECT COUNT(DISTINCT ip) as c FROM visits').get().c;
+  const todayIPs = db.prepare(`SELECT COUNT(DISTINCT ip) as c FROM visits WHERE ts > datetime('now', '-24 hours')`).get().c;
+  res.json(ok({ total, today, uniqueIPs, todayIPs }));
+});
+
 // --- Static files (SPA) ---
 const clientDist = path.join(__dirname, 'client', 'dist');
 app.use(express.static(clientDist));

@@ -3,6 +3,9 @@ import './index.css'
 
 const API = '/api'
 
+// Lightweight visit tracking
+try { fetch(`${API}/track`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: location.pathname }) }).catch(() => {}) } catch(e) {}
+
 function formatTime(t) {
   if (!t) return '-'
   const d = new Date(t + 'Z')

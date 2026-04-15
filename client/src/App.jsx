@@ -19,8 +19,23 @@ function StatusBadge({ status }) {
 }
 
 // --- Add Monitor Dialog ---
-function AddMonitorDialog({ open, onClose, onCreated }) {
-  const [form, setForm] = useState({ name: '', url: '', selector: '', frequency: 60 })
+function AddMonitorDialog({ open, onClose, onCreated, editMonitor }) {
+  const [form, setForm] = useState({ name: '', url: '', selector: '', frequency: 60, keywords: '' })
+  const isEdit = !!editMonitor
+
+  useEffect(() => {
+    if (editMonitor) {
+      setForm({
+        name: editMonitor.name || '',
+        url: editMonitor.url || '',
+        selector: editMonitor.selector || '',
+        frequency: editMonitor.frequency || 60,
+        keywords: editMonitor.keywords || ''
+      })
+    } else {
+      setForm({ name: '', url: '', selector: '', frequency: 60, keywords: '' })
+    }
+  }, [editMonitor, open])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -31,15 +46,17 @@ function AddMonitorDialog({ open, onClose, onCreated }) {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(`${API}/monitors`, {
-        method: 'POST',
+      const url = isEdit ? `${API}/monitors/${editMonitor.id}` : `${API}/monitors`
+      const method = isEdit ? 'PUT' : 'POST'
+      const res = await fetch(url, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form)
       })
       const data = await res.json()
       if (!data.success) throw new Error(data.error)
       onCreated(data.data)
-      setForm({ name: '', url: '', selector: '', frequency: 60 })
+      setForm({ name: '', url: '', selector: '', frequency: 60, keywords: '' })
       onClose()
     } catch (e) {
       setError(e.message)
@@ -51,7 +68,7 @@ function AddMonitorDialog({ open, onClose, onCreated }) {
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
-        <h2 className="text-lg font-bold mb-4">添加监控</h2>
+        <h2 className="text-lg font-bold mb-4">{isEdit ? '编辑监控' : '添加监控'}</h2>
         <form onSubmit={handleSubmit} className="space-y-3">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">名称 *</label>
@@ -75,11 +92,16 @@ function AddMonitorDialog({ open, onClose, onCreated }) {
               <option value={1440}>每天</option>
             </select>
           </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">关键词过滤 <span className="text-gray-400">(可选)</span></label>
+            <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="输入关键词，逗号分隔（留空=所有变化都通知）" value={form.keywords} onChange={e => setForm({ ...form, keywords: e.target.value })} />
+            <p className="text-xs text-gray-400 mt-1">设置后只有包含关键词的变化才会触发通知</p>
+          </div>
           {error && <p className="text-red-500 text-sm">{error}</p>}
           <div className="flex gap-2 pt-2">
             <button type="button" onClick={onClose} className="flex-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
             <button type="submit" disabled={loading} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-              {loading ? '创建中...' : '开始监控'}
+              {loading ? (isEdit ? '保存中...' : '创建中...') : (isEdit ? '保存' : '开始监控')}
             </button>
           </div>
         </form>
@@ -118,45 +140,215 @@ function ChangeDetailDialog({ change, onClose }) {
   )
 }
 
-// --- Settings Dialog ---
-function SettingsDialog({ open, onClose }) {
-  const [webhook, setWebhook] = useState('')
+// --- Settings Dialog (Multi-tab) ---
+function SettingsDialog({ open, onClose, onSettingsChange }) {
+  const [tab, setTab] = useState('feishu')
+  const [settings, setSettings] = useState({})
   const [loading, setLoading] = useState(false)
   const [saved, setSaved] = useState(false)
+  const [testing, setTesting] = useState('')
+  const [testResult, setTestResult] = useState(null)
 
   useEffect(() => {
     if (open) {
       fetch(`${API}/settings`).then(r => r.json()).then(d => {
-        if (d.success) setWebhook(d.data.feishu_webhook || '')
+        if (d.success) setSettings(d.data || {})
       })
+      setSaved(false)
+      setTestResult(null)
     }
   }, [open])
 
   if (!open) return null
 
+  const update = (key, value) => setSettings(prev => ({ ...prev, [key]: value }))
+
   const handleSave = async () => {
     setLoading(true)
-    await fetch(`${API}/settings`, {
-      method: 'PUT',
+    await fetch(`${API}/settings/batch`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: 'feishu_webhook', value: webhook })
+      body: JSON.stringify({ settings })
     })
     setLoading(false)
     setSaved(true)
+    if (onSettingsChange) onSettingsChange(settings)
     setTimeout(() => setSaved(false), 2000)
   }
 
+  const handleTest = async (type) => {
+    setTesting(type)
+    setTestResult(null)
+    try {
+      // Save first
+      await fetch(`${API}/settings/batch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings })
+      })
+      const res = await fetch(`${API}/settings/test-notification`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type })
+      })
+      const data = await res.json()
+      setTestResult(data.success ? { ok: true, msg: '✅ 发送成功！' } : { ok: false, msg: data.error || '发送失败' })
+    } catch (e) {
+      setTestResult({ ok: false, msg: e.message })
+    } finally {
+      setTesting('')
+    }
+  }
+
+  const tabs = [
+    { key: 'feishu', label: '飞书 Webhook', icon: '🐦' },
+    { key: 'webhook', label: '通用 Webhook', icon: '🔗' },
+    { key: 'email', label: '邮件通知', icon: '✉️' }
+  ]
+
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-xl p-6 w-full max-w-md mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
-        <h2 className="text-lg font-bold mb-4">⚙️ 设置</h2>
-        <div className="space-y-3">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">飞书 Webhook URL</label>
-            <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" value={webhook} onChange={e => setWebhook(e.target.value)} />
-            <p className="text-xs text-gray-400 mt-1">配置后，监控到变化会自动发送飞书通知</p>
-          </div>
+      <div className="bg-white rounded-xl p-6 w-full max-w-lg mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
+        <h2 className="text-lg font-bold mb-4">⚙️ 通知设置</h2>
+
+        {/* Tabs */}
+        <div className="flex border-b mb-4">
+          {tabs.map(t => (
+            <button
+              key={t.key}
+              onClick={() => { setTab(t.key); setTestResult(null) }}
+              className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
+                tab === t.key ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              {t.icon} {t.label}
+            </button>
+          ))}
         </div>
+
+        {/* Feishu Tab */}
+        {tab === 'feishu' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">飞书 Webhook URL</label>
+              <input
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
+                value={settings.feishu_webhook || ''}
+                onChange={e => update('feishu_webhook', e.target.value)}
+              />
+              <p className="text-xs text-gray-400 mt-1">在飞书群添加自定义机器人，复制 Webhook 地址粘贴到此处</p>
+            </div>
+            <button
+              onClick={() => handleTest('feishu')}
+              disabled={!settings.feishu_webhook || testing === 'feishu'}
+              className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {testing === 'feishu' ? '发送中...' : '📨 测试发送'}
+            </button>
+          </div>
+        )}
+
+        {/* Webhook Tab */}
+        {tab === 'webhook' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">通用 Webhook URL</label>
+              <input
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="https://your-server.com/webhook"
+                value={settings.webhook_url || ''}
+                onChange={e => update('webhook_url', e.target.value)}
+              />
+              <p className="text-xs text-gray-400 mt-1">变化检测到后会 POST JSON 到该地址，包含 monitor_name, monitor_url, summary, detected_at</p>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <p className="text-xs font-medium text-gray-600 mb-1">POST Body 示例：</p>
+              <pre className="text-xs text-gray-500">{`{
+  "monitor_name": "竞品官网",
+  "monitor_url": "https://...",
+  "summary": "AI摘要内容",
+  "detected_at": "2026-04-15T12:00:00Z"
+}`}</pre>
+            </div>
+            <button
+              onClick={() => handleTest('webhook')}
+              disabled={!settings.webhook_url || testing === 'webhook'}
+              className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {testing === 'webhook' ? '发送中...' : '📨 测试发送'}
+            </button>
+          </div>
+        )}
+
+        {/* Email Tab */}
+        {tab === 'email' && (
+          <div className="space-y-3">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">收件邮箱</label>
+              <input
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="your@email.com"
+                value={settings.email_to || ''}
+                onChange={e => update('email_to', e.target.value)}
+                type="email"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 服务器</label>
+              <div className="grid grid-cols-3 gap-2">
+                <input
+                  className="col-span-2 border rounded-lg px-3 py-2 text-sm"
+                  placeholder="smtp.gmail.com"
+                  value={settings.smtp_host || ''}
+                  onChange={e => update('smtp_host', e.target.value)}
+                />
+                <input
+                  className="border rounded-lg px-3 py-2 text-sm"
+                  placeholder="587"
+                  value={settings.smtp_port || ''}
+                  onChange={e => update('smtp_port', e.target.value)}
+                  type="number"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 用户名</label>
+              <input
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="your@gmail.com"
+                value={settings.smtp_user || ''}
+                onChange={e => update('smtp_user', e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 密码 / 应用密码</label>
+              <input
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="应用专用密码"
+                value={settings.smtp_pass || ''}
+                onChange={e => update('smtp_pass', e.target.value)}
+                type="password"
+              />
+              <p className="text-xs text-gray-400 mt-1">Gmail 用户请使用「应用专用密码」，非账号密码</p>
+            </div>
+            <button
+              onClick={() => handleTest('email')}
+              disabled={!settings.email_to || !settings.smtp_host || !settings.smtp_user || !settings.smtp_pass || testing === 'email'}
+              className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {testing === 'email' ? '发送中...' : '📨 测试发送'}
+            </button>
+          </div>
+        )}
+
+        {/* Test result */}
+        {testResult && (
+          <div className={`mt-3 p-2 rounded-lg text-sm ${testResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+            {testResult.msg}
+          </div>
+        )}
+
         <div className="flex gap-2 pt-4">
           <button onClick={onClose} className="flex-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
           <button onClick={handleSave} disabled={loading} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
@@ -169,19 +361,27 @@ function SettingsDialog({ open, onClose }) {
 }
 
 // --- Monitor Detail View ---
-function MonitorDetail({ monitor, onBack }) {
+function MonitorDetail({ monitor, onBack, onEdit }) {
   const [changes, setChanges] = useState([])
+  const [totalChanges, setTotalChanges] = useState(0)
+  const [filteredChanges, setFilteredChanges] = useState(0)
+  const [showAll, setShowAll] = useState(false)
   const [loading, setLoading] = useState(true)
   const [checking, setChecking] = useState(false)
   const [selectedChange, setSelectedChange] = useState(null)
 
-  useEffect(() => { loadChanges() }, [monitor.id])
+  useEffect(() => { loadChanges() }, [monitor.id, showAll])
 
   const loadChanges = async () => {
     setLoading(true)
-    const res = await fetch(`${API}/monitors/${monitor.id}/changes`)
+    const qs = showAll ? '?all=1' : ''
+    const res = await fetch(`${API}/monitors/${monitor.id}/changes${qs}`)
     const data = await res.json()
-    if (data.success) setChanges(data.data.changes)
+    if (data.success) {
+      setChanges(data.data.changes)
+      setTotalChanges(data.data.totalChanges ?? 0)
+      setFilteredChanges(data.data.filteredChanges ?? 0)
+    }
     setLoading(false)
   }
 
@@ -211,15 +411,32 @@ function MonitorDetail({ monitor, onBack }) {
               {monitor.selector && <span>选择器: <code className="bg-gray-100 px-1 rounded">{monitor.selector}</code></span>}
               <StatusBadge status={monitor.status} />
             </div>
+            {monitor.keywords && <p className="text-sm text-gray-500 mt-1">🌟 关键词: <span className="bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded text-xs">{monitor.keywords}</span></p>}
             {monitor.error_message && <p className="text-sm text-red-500 mt-1">{monitor.error_message}</p>}
           </div>
-          <button onClick={triggerCheck} disabled={checking} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 shrink-0">
-            {checking ? '检查中...' : '立即检查'}
-          </button>
+          <div className="flex gap-2 shrink-0">
+            <button onClick={() => onEdit && onEdit(monitor)} className="px-3 py-1.5 border rounded-lg text-sm hover:bg-gray-50">编辑</button>
+            <button onClick={triggerCheck} disabled={checking} className="px-3 py-1.5 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
+              {checking ? '检查中...' : '立即检查'}
+            </button>
+          </div>
         </div>
       </div>
 
-      <h3 className="font-semibold mb-3">变化历史 ({changes.length})</h3>
+      <div className="flex items-center justify-between mb-3">
+        <h3 className="font-semibold">
+          变化历史
+          {filteredChanges > 0
+            ? <span className="text-sm font-normal text-gray-500 ml-2">显示 {totalChanges - filteredChanges} 条，已过滤 {filteredChanges} 条（共 {totalChanges} 条）</span>
+            : <span className="text-sm font-normal text-gray-500 ml-2">({totalChanges})</span>
+          }
+        </h3>
+        {filteredChanges > 0 && (
+          <button onClick={() => setShowAll(!showAll)} className="text-xs text-blue-600 hover:underline">
+            {showAll ? '只看匹配的' : '显示全部'}
+          </button>
+        )}
+      </div>
       {loading ? (
         <p className="text-gray-400 text-sm">加载中...</p>
       ) : changes.length === 0 ? (
@@ -230,9 +447,12 @@ function MonitorDetail({ monitor, onBack }) {
       ) : (
         <div className="space-y-2">
           {changes.map(c => (
-            <div key={c.id} onClick={() => loadChangeDetail(c.id)} className="bg-white rounded-lg border p-4 cursor-pointer hover:border-blue-300 transition-colors">
+            <div key={c.id} onClick={() => loadChangeDetail(c.id)} className={`bg-white rounded-lg border p-4 cursor-pointer hover:border-blue-300 transition-colors ${c.filtered ? 'opacity-60' : ''}`}>
               <div className="flex justify-between items-start">
-                <p className="text-sm flex-1">{c.ai_summary || '(无摘要)'}</p>
+                <p className="text-sm flex-1">
+                  {c.filtered ? <span className="inline-block bg-gray-100 text-gray-500 text-xs px-1.5 py-0.5 rounded mr-1.5">已过滤</span> : null}
+                  {c.ai_summary || '(无摘要)'}
+                </p>
                 <span className="text-xs text-gray-400 shrink-0 ml-4">{formatTime(c.detected_at)}</span>
               </div>
             </div>
@@ -285,6 +505,16 @@ function LandingPage({ onEnter }) {
   )
 }
 
+// --- Notification Guide Banner ---
+function NotifyBanner({ onOpenSettings }) {
+  return (
+    <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-4 flex items-center justify-between">
+      <span className="text-sm text-amber-800">💡 配置通知后，有变化会自动推送给你</span>
+      <button onClick={onOpenSettings} className="text-sm text-amber-700 font-medium hover:text-amber-900 shrink-0 ml-3">去设置 →</button>
+    </div>
+  )
+}
+
 // --- Main App ---
 export default function App() {
   const [entered, setEntered] = useState(() => localStorage.getItem('dingsao_entered') === '1')
@@ -294,17 +524,24 @@ export default function App() {
   const [showAdd, setShowAdd] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [selectedMonitor, setSelectedMonitor] = useState(null)
+  const [editingMonitor, setEditingMonitor] = useState(null)
+  const [hasNotifyConfig, setHasNotifyConfig] = useState(true)
 
   useEffect(() => { if (entered) loadData() }, [entered])
 
   const loadData = async () => {
     setLoading(true)
-    const [mRes, sRes] = await Promise.all([
+    const [mRes, sRes, settingsRes] = await Promise.all([
       fetch(`${API}/monitors`).then(r => r.json()),
-      fetch(`${API}/stats`).then(r => r.json())
+      fetch(`${API}/stats`).then(r => r.json()),
+      fetch(`${API}/settings`).then(r => r.json())
     ])
     if (mRes.success) setMonitors(mRes.data)
     if (sRes.success) setStats(sRes.data)
+    if (settingsRes.success) {
+      const s = settingsRes.data
+      setHasNotifyConfig(!!(s.feishu_webhook || s.webhook_url || s.email_to))
+    }
     setLoading(false)
   }
 
@@ -323,7 +560,8 @@ export default function App() {
     return (
       <div className="min-h-screen bg-gray-50">
         <div className="max-w-3xl mx-auto px-4 py-6">
-          <MonitorDetail monitor={selectedMonitor} onBack={() => { setSelectedMonitor(null); loadData() }} />
+          <MonitorDetail monitor={selectedMonitor} onBack={() => { setSelectedMonitor(null); loadData() }} onEdit={(m) => { setEditingMonitor(m); setShowAdd(true) }} />
+          <AddMonitorDialog open={showAdd} onClose={() => { setShowAdd(false); setEditingMonitor(null) }} editMonitor={editingMonitor} onCreated={(updated) => { setSelectedMonitor(updated); loadData() }} />
         </div>
       </div>
     )
@@ -345,6 +583,11 @@ export default function App() {
             </button>
           </div>
         </div>
+
+        {/* Notification Guide Banner */}
+        {!loading && !hasNotifyConfig && (
+          <NotifyBanner onOpenSettings={() => setShowSettings(true)} />
+        )}
 
         {/* Stats */}
         {stats && (
@@ -398,8 +641,8 @@ export default function App() {
           </div>
         )}
       </div>
-      <AddMonitorDialog open={showAdd} onClose={() => setShowAdd(false)} onCreated={() => loadData()} />
-      <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} />
+      <AddMonitorDialog open={showAdd} onClose={() => { setShowAdd(false); setEditingMonitor(null) }} editMonitor={editingMonitor} onCreated={() => loadData()} />
+      <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} onSettingsChange={(s) => setHasNotifyConfig(!!(s.feishu_webhook || s.webhook_url || s.email_to))} />
     </div>
   )
 }

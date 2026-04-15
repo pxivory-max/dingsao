@@ -6,6 +6,7 @@ const cron = require('node-cron');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors());
@@ -44,6 +45,10 @@ db.exec(`
     value TEXT
   );
 `);
+
+// --- Schema Migrations ---
+try { db.exec(`ALTER TABLE monitors ADD COLUMN keywords TEXT`); } catch(e) { /* column already exists */ }
+try { db.exec(`ALTER TABLE changes ADD COLUMN filtered INTEGER DEFAULT 0`); } catch(e) { /* column already exists */ }
 
 // --- Helpers ---
 const ok = (data) => ({ success: true, data });
@@ -196,12 +201,16 @@ function contentChanged(oldContent, newContent) {
   return true;
 }
 
-async function sendNotification(monitor, summary) {
-  // Feishu webhook notification
-  const webhookUrl = db.prepare(`SELECT value FROM settings WHERE key = 'feishu_webhook'`).get()?.value;
+// --- Notification Helpers ---
+function getSetting(key) {
+  return db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key)?.value || '';
+}
+
+async function sendFeishuNotification(monitor, summary) {
+  const webhookUrl = getSetting('feishu_webhook');
   if (!webhookUrl) return;
   try {
-    await fetch(webhookUrl, {
+    const res = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -218,11 +227,75 @@ async function sendNotification(monitor, summary) {
         }
       })
     });
-    // Mark change as notified
-    db.prepare(`UPDATE changes SET notified = 1 WHERE monitor_id = ? AND notified = 0`).run(monitor.id);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     console.log(`[通知] 已发送飞书通知: ${monitor.name}`);
   } catch (e) {
     console.error(`[通知] 飞书发送失败:`, e.message);
+  }
+}
+
+async function sendWebhookNotification(monitor, summary) {
+  const webhookUrl = getSetting('webhook_url');
+  if (!webhookUrl) return;
+  try {
+    const res = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        monitor_name: monitor.name,
+        monitor_url: monitor.url,
+        summary: summary,
+        detected_at: new Date().toISOString()
+      })
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    console.log(`[通知] 已发送 Webhook 通知: ${monitor.name}`);
+  } catch (e) {
+    console.error(`[通知] Webhook 发送失败:`, e.message);
+  }
+}
+
+async function sendEmailNotification(monitor, summary) {
+  const emailTo = getSetting('email_to');
+  const smtpHost = getSetting('smtp_host');
+  const smtpPort = getSetting('smtp_port') || '587';
+  const smtpUser = getSetting('smtp_user');
+  const smtpPass = getSetting('smtp_pass');
+  if (!emailTo || !smtpHost || !smtpUser || !smtpPass) return;
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: parseInt(smtpPort),
+      secure: parseInt(smtpPort) === 465,
+      auth: { user: smtpUser, pass: smtpPass }
+    });
+    await transporter.sendMail({
+      from: smtpUser,
+      to: emailTo,
+      subject: `🔭 盯梢提醒：${monitor.name} 发生变化`,
+      html: `<h2>🚨 ${monitor.name} 发生变化</h2>
+<p><strong>网址：</strong><a href="${monitor.url}">${monitor.url}</a></p>
+<h3>AI 摘要</h3>
+<p>${summary.replace(/\n/g, '<br>')}</p>
+<hr>
+<p style="color:#999;font-size:12px">来自盯梢（DingSao）监控系统</p>`
+    });
+    console.log(`[通知] 已发送邮件通知: ${monitor.name} → ${emailTo}`);
+  } catch (e) {
+    console.error(`[通知] 邮件发送失败:`, e.message);
+  }
+}
+
+async function sendNotification(monitor, summary) {
+  const results = await Promise.allSettled([
+    sendFeishuNotification(monitor, summary),
+    sendWebhookNotification(monitor, summary),
+    sendEmailNotification(monitor, summary)
+  ]);
+  // Mark changes as notified if any notification was attempted
+  const anyConfigured = getSetting('feishu_webhook') || getSetting('webhook_url') || getSetting('email_to');
+  if (anyConfigured) {
+    db.prepare(`UPDATE changes SET notified = 1 WHERE monitor_id = ? AND notified = 0`).run(monitor.id);
   }
 }
 
@@ -246,14 +319,30 @@ async function checkMonitor(monitor) {
     }
     // Content changed! AI summarize
     const summary = await aiSummarize(monitor.last_content, newContent);
+
+    // Keyword filtering
+    let filtered = 0;
+    if (monitor.keywords && monitor.keywords.trim()) {
+      const kws = monitor.keywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
+      if (kws.length > 0) {
+        const haystack = (summary + ' ' + newContent).toLowerCase();
+        const matched = kws.some(kw => haystack.includes(kw));
+        if (!matched) filtered = 1;
+      }
+    }
+
     // Save change
-    db.prepare('INSERT INTO changes (monitor_id, old_content, new_content, ai_summary) VALUES (?, ?, ?, ?)').run(
-      monitor.id, monitor.last_content.substring(0, 10000), newContent.substring(0, 10000), summary
+    db.prepare('INSERT INTO changes (monitor_id, old_content, new_content, ai_summary, filtered) VALUES (?, ?, ?, ?, ?)').run(
+      monitor.id, monitor.last_content.substring(0, 10000), newContent.substring(0, 10000), summary, filtered
     );
     updateStmt.run('active', null, newContent, monitor.id);
-    console.log(`[${monitor.name}] 检测到变化: ${summary.substring(0, 100)}`);
-    // Send notification
-    await sendNotification(monitor, summary);
+    if (filtered) {
+      console.log(`[${monitor.name}] 检测到变化但未匹配关键词，已过滤: ${summary.substring(0, 80)}`);
+    } else {
+      console.log(`[${monitor.name}] 检测到变化: ${summary.substring(0, 100)}`);
+      // Send notification (only for non-filtered changes)
+      await sendNotification(monitor, summary);
+    }
   } catch (e) {
     updateStmt.run('error', e.message, monitor.last_content, monitor.id);
     console.error(`[${monitor.name}] 抓取失败:`, e.message);
@@ -280,15 +369,15 @@ cron.schedule('* * * * *', checkSchedule);
 
 // Create monitor
 app.post('/api/monitors', (req, res) => {
-  const { name, url, selector, frequency } = req.body;
+  const { name, url, selector, frequency, keywords } = req.body;
   if (!name || !url) return res.status(400).json(fail('name 和 url 必填'));
   try {
     new URL(url); // validate URL
   } catch {
     return res.status(400).json(fail('无效的 URL'));
   }
-  const result = db.prepare('INSERT INTO monitors (name, url, selector, frequency) VALUES (?, ?, ?, ?)').run(
-    name, url, selector || null, frequency || 60
+  const result = db.prepare('INSERT INTO monitors (name, url, selector, frequency, keywords) VALUES (?, ?, ?, ?, ?)').run(
+    name, url, selector || null, frequency || 60, keywords || null
   );
   const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(result.lastInsertRowid);
   // Trigger first check immediately
@@ -298,18 +387,18 @@ app.post('/api/monitors', (req, res) => {
 
 // List monitors
 app.get('/api/monitors', (req, res) => {
-  const monitors = db.prepare('SELECT id, name, url, selector, frequency, last_check_at, status, error_message, created_at, updated_at FROM monitors ORDER BY created_at DESC').all();
+  const monitors = db.prepare('SELECT id, name, url, selector, frequency, keywords, last_check_at, status, error_message, created_at, updated_at FROM monitors ORDER BY created_at DESC').all();
   res.json(ok(monitors));
 });
 
 // Update monitor
 app.put('/api/monitors/:id', (req, res) => {
-  const { name, url, selector, frequency, status } = req.body;
+  const { name, url, selector, frequency, status, keywords } = req.body;
   const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id);
   if (!monitor) return res.status(404).json(fail('监控不存在'));
-  db.prepare(`UPDATE monitors SET name = ?, url = ?, selector = ?, frequency = ?, status = ?, updated_at = datetime('now') WHERE id = ?`).run(
+  db.prepare(`UPDATE monitors SET name = ?, url = ?, selector = ?, frequency = ?, status = ?, keywords = ?, updated_at = datetime('now') WHERE id = ?`).run(
     name || monitor.name, url || monitor.url, selector !== undefined ? selector : monitor.selector,
-    frequency || monitor.frequency, status || monitor.status, req.params.id
+    frequency || monitor.frequency, status || monitor.status, keywords !== undefined ? keywords : monitor.keywords, req.params.id
   );
   res.json(ok(db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id)));
 });
@@ -341,8 +430,13 @@ app.get('/api/monitors/:id/changes', (req, res) => {
   const monitor = db.prepare('SELECT * FROM monitors WHERE id = ?').get(req.params.id);
   if (!monitor) return res.status(404).json(fail('监控不存在'));
   const limit = parseInt(req.query.limit) || 50;
-  const changes = db.prepare('SELECT id, monitor_id, ai_summary, detected_at, notified FROM changes WHERE monitor_id = ? ORDER BY detected_at DESC LIMIT ?').all(req.params.id, limit);
-  res.json(ok({ monitor: { id: monitor.id, name: monitor.name, url: monitor.url }, changes }));
+  const showAll = req.query.all === '1';
+  const changes = showAll
+    ? db.prepare('SELECT id, monitor_id, ai_summary, detected_at, notified, filtered FROM changes WHERE monitor_id = ? ORDER BY detected_at DESC LIMIT ?').all(req.params.id, limit)
+    : db.prepare('SELECT id, monitor_id, ai_summary, detected_at, notified, filtered FROM changes WHERE monitor_id = ? AND filtered = 0 ORDER BY detected_at DESC LIMIT ?').all(req.params.id, limit);
+  const totalChanges = db.prepare('SELECT COUNT(*) as count FROM changes WHERE monitor_id = ?').get(req.params.id).count;
+  const filteredChanges = db.prepare('SELECT COUNT(*) as count FROM changes WHERE monitor_id = ? AND filtered = 1').get(req.params.id).count;
+  res.json(ok({ monitor: { id: monitor.id, name: monitor.name, url: monitor.url }, changes, totalChanges, filteredChanges }));
 });
 
 // Get single change detail
@@ -365,6 +459,47 @@ app.put('/api/settings', (req, res) => {
   if (!key) return res.status(400).json(fail('key 必填'));
   db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, value || '');
   res.json(ok({ [key]: value }));
+});
+
+// Batch settings update
+app.post('/api/settings/batch', (req, res) => {
+  const { settings } = req.body;
+  if (!settings || typeof settings !== 'object') return res.status(400).json(fail('settings 对象必填'));
+  const upsert = db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)');
+  const saveMany = db.transaction((items) => {
+    for (const [key, value] of Object.entries(items)) {
+      upsert.run(key, value || '');
+    }
+  });
+  saveMany(settings);
+  res.json(ok(settings));
+});
+
+// Test notification endpoint
+app.post('/api/settings/test-notification', async (req, res) => {
+  const { type } = req.body; // 'feishu' | 'webhook' | 'email'
+  const testMonitor = { id: 0, name: '测试监控', url: 'https://example.com' };
+  const testSummary = '🧪 这是一条测试通知，说明你的通知配置正确！';
+  try {
+    if (type === 'feishu') {
+      const url = getSetting('feishu_webhook');
+      if (!url) return res.status(400).json(fail('请先配置飞书 Webhook URL'));
+      await sendFeishuNotification(testMonitor, testSummary);
+    } else if (type === 'webhook') {
+      const url = getSetting('webhook_url');
+      if (!url) return res.status(400).json(fail('请先配置 Webhook URL'));
+      await sendWebhookNotification(testMonitor, testSummary);
+    } else if (type === 'email') {
+      const emailTo = getSetting('email_to');
+      if (!emailTo) return res.status(400).json(fail('请先配置收件邮箱'));
+      await sendEmailNotification(testMonitor, testSummary);
+    } else {
+      return res.status(400).json(fail('type 必须是 feishu/webhook/email'));
+    }
+    res.json(ok({ sent: true }));
+  } catch (e) {
+    res.status(500).json(fail(`发送失败: ${e.message}`));
+  }
 });
 
 // Stats

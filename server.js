@@ -81,18 +81,18 @@ async function fetchPage(url, selector) {
 }
 
 async function aiSummarize(oldContent, newContent) {
-  if (!process.env.ARK_API_KEY || !process.env.ARK_ENDPOINT) {
+  if (!process.env.AI_API_KEY || !process.env.AI_ENDPOINT) {
     return diffFallback(oldContent, newContent);
   }
   try {
-    const res = await fetch(process.env.ARK_ENDPOINT, {
+    const res = await fetch(process.env.AI_ENDPOINT, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.ARK_API_KEY}`
+        'Authorization': `Bearer ${process.env.AI_API_KEY}`
       },
       body: JSON.stringify({
-        model: process.env.ARK_MODEL || 'doubao-seed-2.0-pro',
+        model: process.env.AI_MODEL || 'MaaS_Sonnet_4',
         messages: [
           {
             role: 'system',
@@ -129,10 +129,16 @@ function contentChanged(oldContent, newContent) {
   const normalize = (s) => s.replace(/\s+/g, ' ').trim();
   const a = normalize(oldContent);
   const b = normalize(newContent);
-  // Allow 0.5% tolerance for minor whitespace/ad changes
   if (a === b) return false;
-  const similarity = 1 - (Math.abs(a.length - b.length) / Math.max(a.length, b.length, 1));
-  if (similarity > 0.995) return false;
+  // Compare first 5000 chars for actual text difference
+  const sample = Math.min(5000, a.length, b.length);
+  let diffChars = 0;
+  for (let i = 0; i < sample; i++) {
+    if (a[i] !== b[i]) diffChars++;
+  }
+  const diffRatio = diffChars / sample;
+  // If less than 0.5% of characters differ, treat as no change (noise)
+  if (diffRatio < 0.005) return false;
   return true;
 }
 

@@ -63,6 +63,10 @@ try { db.exec(`ALTER TABLE monitors ADD COLUMN keywords TEXT`); } catch(e) { /* 
 try { db.exec(`ALTER TABLE changes ADD COLUMN filtered INTEGER DEFAULT 0`); } catch(e) { /* column already exists */ }
 try { db.exec(`ALTER TABLE monitors ADD COLUMN user_id INTEGER DEFAULT NULL`); } catch(e) { /* column already exists */ }
 try { db.exec(`ALTER TABLE settings ADD COLUMN user_id INTEGER DEFAULT NULL`); } catch(e) { /* column already exists */ }
+// PM Brief columns
+try { db.exec(`ALTER TABLE changes ADD COLUMN importance TEXT`); } catch(e) { /* column already exists */ }
+try { db.exec(`ALTER TABLE changes ADD COLUMN pm_insight TEXT`); } catch(e) { /* column already exists */ }
+try { db.exec(`ALTER TABLE changes ADD COLUMN tags TEXT`); } catch(e) { /* column already exists */ }
 
 // --- JWT & Auth Helpers ---
 const JWT_SECRET = process.env.JWT_SECRET || crypto.randomBytes(32).toString('hex');
@@ -158,8 +162,15 @@ async function fetchPageBrowser(url, selector) {
   });
   const page = await context.newPage();
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(3000); // Wait for JS rendering
+    // 更宽容的加载策略：先等 domcontentloaded，失败时 fallback 到 commit
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    } catch (e) {
+      if (!/Timeout/.test(e.message)) throw e;
+      console.log(`[domcontentloaded 超时，fallback 到 commit: ${url}]`);
+      await page.goto(url, { waitUntil: 'commit', timeout: 15000 });
+    }
+    await page.waitForTimeout(5000); // Wait for JS rendering
     let text;
     if (selector) {
       text = await page.textContent(selector).catch(() => null);
@@ -195,13 +206,42 @@ async function fetchPage(url, selector) {
   }
 }
 
-async function aiSummarize(oldContent, newContent) {
+async function aiSummarize(oldContent, newContent, monitor) {
   if (!process.env.AI_API_KEY || !process.env.AI_ENDPOINT) {
-    return diffFallback(oldContent, newContent);
+    return { summary: diffFallback(oldContent, newContent), importance: 'medium', pm_insight: 'AI 摘要不可用，请查看原文', tags: [] };
   }
   try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    const pmPrompt = `你是一位资深 AI 产品经理，正在帮另一位 PM 快速过滤信息。
+
+监控对象：${monitor ? monitor.name : '未知'}
+URL：${monitor ? monitor.url : '未知'}
+检测到的变化：
+旧内容（前3000字）：
+${oldContent.substring(0, 3000)}
+
+新内容（前3000字）：
+${newContent.substring(0, 3000)}
+
+请按以下格式输出（严格 JSON，不要输出任何其他内容）：
+{
+  "importance": "high" 或 "medium" 或 "low",
+  "summary": "一句话说清变了什么（≤40字）",
+  "pm_insight": "对一个AI/产品从业者意味着什么，用大白话，2句话以内（≤60字）。如果是无意义的措辞润色或排版改动，直接说「纯文案调整，可忽略」",
+  "tags": ["AI模型", "产品功能", "定价", "政策", "融资", "人事", "技术", "无意义"]
+}
+
+判断重要性标准：
+- high：发布新产品/新模型/重大功能/融资/政策变化
+- medium：产品小功能更新/博客新文章/技术文档更新
+- low：纯文案调整/版式变化/无实质内容变化
+
+tags 只选上面列出的标签中相关的，可多选。`;
+
     const res = await fetch(process.env.AI_ENDPOINT, {
       method: 'POST',
+      signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.AI_API_KEY}`
@@ -209,25 +249,37 @@ async function aiSummarize(oldContent, newContent) {
       body: JSON.stringify({
         model: process.env.AI_MODEL || 'MaaS_Sonnet_4',
         messages: [
-          {
-            role: 'system',
-            content: '你是一个网页变化分析助手。精确对比旧内容和新内容的差异。\n\n规则：\n1. 严格基于给定文本对比，不推测截取范围外的内容\n2. 区分"消失"和"移出视野"：旧内容有但新内容没有的条目，说"在当前视野中未出现"而非"被删除"（可能只是排名移出了截取范围）\n3. 新出现的条目明确标注\n4. 数字变化精确标注（如 486→501）\n5. 能看出顺序变化的标注位移\n6. 仅排版/空格/时间戳变化→说"无实质性变化"\n\n输出格式（没有的跳过）：\n🆕 新出现 | 📊 数据/排名变化 | 👋 视野中未出现 | 📝 其他修改\n不超过300字。'
-          },
-          {
-            role: 'user',
-            content: `旧内容（前3000字）：\n${oldContent.substring(0, 3000)}\n\n新内容（前3000字）：\n${newContent.substring(0, 3000)}`
-          }
+          { role: 'user', content: pmPrompt }
         ],
         temperature: 0.2,
         max_tokens: 800
       })
     });
+    clearTimeout(timeout);
     if (!res.ok) throw new Error(`AI API ${res.status}`);
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || diffFallback(oldContent, newContent);
+    const content = data.choices?.[0]?.message?.content || '';
+    // Try to parse JSON from AI response
+    try {
+      // Extract JSON from response (may have markdown fences)
+      const jsonMatch = content.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        return {
+          summary: parsed.summary || content,
+          importance: ['high', 'medium', 'low'].includes(parsed.importance) ? parsed.importance : 'medium',
+          pm_insight: parsed.pm_insight || '',
+          tags: Array.isArray(parsed.tags) ? parsed.tags : []
+        };
+      }
+    } catch (parseErr) {
+      console.error('AI PM JSON parse error:', parseErr.message);
+    }
+    // Fallback: use raw text as summary
+    return { summary: content, importance: 'medium', pm_insight: '', tags: [] };
   } catch (e) {
     console.error('AI summarize error:', e.message);
-    return diffFallback(oldContent, newContent);
+    return { summary: diffFallback(oldContent, newContent), importance: 'medium', pm_insight: 'AI 摘要失败，请查看原文', tags: [] };
   }
 }
 
@@ -377,30 +429,31 @@ async function checkMonitor(monitor) {
       return;
     }
     // Content changed! AI summarize
-    const summary = await aiSummarize(monitor.last_content, newContent);
+    const aiResult = await aiSummarize(monitor.last_content, newContent, monitor);
 
     // Keyword filtering
     let filtered = 0;
     if (monitor.keywords && monitor.keywords.trim()) {
       const kws = monitor.keywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean);
       if (kws.length > 0) {
-        const haystack = (summary + ' ' + newContent).toLowerCase();
+        const haystack = (aiResult.summary + ' ' + newContent).toLowerCase();
         const matched = kws.some(kw => haystack.includes(kw));
         if (!matched) filtered = 1;
       }
     }
 
-    // Save change
-    db.prepare('INSERT INTO changes (monitor_id, old_content, new_content, ai_summary, filtered) VALUES (?, ?, ?, ?, ?)').run(
-      monitor.id, monitor.last_content.substring(0, 10000), newContent.substring(0, 10000), summary, filtered
+    // Save change with PM fields
+    db.prepare('INSERT INTO changes (monitor_id, old_content, new_content, ai_summary, filtered, importance, pm_insight, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+      monitor.id, monitor.last_content.substring(0, 10000), newContent.substring(0, 10000), aiResult.summary, filtered,
+      aiResult.importance, aiResult.pm_insight, JSON.stringify(aiResult.tags)
     );
     updateStmt.run('active', null, newContent, monitor.id);
     if (filtered) {
-      console.log(`[${monitor.name}] 检测到变化但未匹配关键词，已过滤: ${summary.substring(0, 80)}`);
+      console.log(`[${monitor.name}] 检测到变化但未匹配关键词，已过滤: ${aiResult.summary.substring(0, 80)}`);
     } else {
-      console.log(`[${monitor.name}] 检测到变化: ${summary.substring(0, 100)}`);
+      console.log(`[${monitor.name}] 检测到变化 [${aiResult.importance}]: ${aiResult.summary.substring(0, 100)}`);
       // Send notification (only for non-filtered changes)
-      await sendNotification(monitor, summary);
+      await sendNotification(monitor, aiResult.summary);
     }
   } catch (e) {
     updateStmt.run('error', e.message, monitor.last_content, monitor.id);
@@ -628,12 +681,85 @@ app.get('/api/visits/stats', (req, res) => {
   res.json(ok({ total, today, uniqueIPs, todayIPs }));
 });
 
+// --- PM Template Presets ---
+const PM_TEMPLATES = [
+  { name: 'OpenAI Blog', url: 'https://openai.com/blog', category: 'AI / 模型层' },
+  { name: 'Anthropic News', url: 'https://www.anthropic.com/news', category: 'AI / 模型层' },
+  { name: 'Google DeepMind Blog', url: 'https://deepmind.google/discover/blog/', category: 'AI / 模型层' },
+  { name: 'Cursor Changelog', url: 'https://cursor.com/changelog', category: 'AI 产品 / 工具' },
+  { name: 'Linear Changelog', url: 'https://linear.app/changelog', category: 'AI 产品 / 工具' },
+  { name: 'Notion What\'s New', url: 'https://www.notion.so/releases', category: 'AI 产品 / 工具' },
+  { name: 'Figma Release Notes', url: 'https://www.figma.com/release-notes/', category: 'AI 产品 / 工具' },
+  { name: 'Vercel Changelog', url: 'https://vercel.com/changelog', category: 'AI 产品 / 工具' },
+  { name: 'v0 Changelog', url: 'https://v0.dev/changelog', category: 'AI 产品 / 工具' },
+  { name: 'Replit Blog', url: 'https://blog.replit.com', category: 'AI 产品 / 工具' },
+  { name: 'HackerNews', url: 'https://news.ycombinator.com/', category: '社区 / 趋势' },
+  { name: 'Product Hunt Today', url: 'https://www.producthunt.com', category: '社区 / 趋势' },
+];
+
+app.post('/api/monitors/pm-templates', authMiddleware, (req, res) => {
+  const existing = db.prepare('SELECT url FROM monitors WHERE user_id = ?').all(req.user.id).map(m => m.url);
+  const added = [];
+  const skipped = [];
+  for (const t of PM_TEMPLATES) {
+    if (existing.includes(t.url)) {
+      skipped.push(t.name);
+      continue;
+    }
+    db.prepare('INSERT INTO monitors (name, url, selector, frequency, keywords, user_id) VALUES (?, ?, ?, ?, ?, ?)').run(
+      t.name, t.url, null, 60, null, req.user.id
+    );
+    added.push(t.name);
+  }
+  // Trigger first check for newly added monitors
+  const newMonitors = db.prepare('SELECT * FROM monitors WHERE user_id = ? AND last_content IS NULL AND status = ?').all(req.user.id, 'active');
+  for (const m of newMonitors) {
+    checkMonitor(m).catch(e => console.error(`PM template first check error [${m.name}]:`, e.message));
+  }
+  res.json(ok({ added, skipped, total: PM_TEMPLATES.length }));
+});
+
+app.get('/api/pm-templates', authMiddleware, (req, res) => {
+  res.json(ok(PM_TEMPLATES));
+});
+
+// --- Daily Brief API ---
+app.get('/api/daily-brief', authMiddleware, (req, res) => {
+  const date = req.query.date || new Date().toISOString().split('T')[0];
+  // Get changes from the past 24h of that date (date is YYYY-MM-DD)
+  const dateStart = `${date} 00:00:00`;
+  const dateEnd = `${date} 23:59:59`;
+  const changes = db.prepare(`
+    SELECT c.id, c.monitor_id, c.ai_summary, c.detected_at, c.importance, c.pm_insight, c.tags, c.filtered,
+           m.name as monitor_name, m.url as monitor_url
+    FROM changes c
+    JOIN monitors m ON c.monitor_id = m.id
+    WHERE m.user_id = ? AND c.detected_at >= ? AND c.detected_at <= ? AND c.filtered = 0
+    ORDER BY
+      CASE c.importance WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 3 END,
+      c.detected_at DESC
+  `).all(req.user.id, dateStart, dateEnd);
+
+  const counts = { high: 0, medium: 0, low: 0 };
+  for (const c of changes) {
+    const imp = c.importance || 'medium';
+    if (counts[imp] !== undefined) counts[imp]++;
+    // Parse tags JSON
+    try { c.tags = JSON.parse(c.tags || '[]'); } catch { c.tags = []; }
+  }
+
+  res.json(ok({ date, counts, changes }));
+});
+
 // --- Static files (SPA) ---
 const clientDist = path.join(__dirname, 'client', 'dist');
+const indexHtml = (() => {
+  try { return require('fs').readFileSync(path.join(clientDist, 'index.html'), 'utf-8'); } catch { return '<html><body>Build not found. Run: npm run build</body></html>'; }
+})();
 app.use(express.static(clientDist));
 app.get('/{*splat}', (req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json(fail('API not found'));
-  res.sendFile(path.join(clientDist, 'index.html'));
+  res.type('html').send(indexHtml);
 });
 
 // --- Start ---

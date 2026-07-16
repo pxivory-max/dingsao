@@ -118,7 +118,7 @@ Node.js + React + SQLite，AI 摘要用的火山方舟的模型。支持 CSS 选
 
 ### 体验地址
 
-https://himself-push-leone-gap.trycloudflare.com
+https://martha-terminal-shows-opinions.trycloudflare.com
 
 你可以直接试：找个你平时会反复刷的网页（比如某个论坛、某个招聘页），填进去选 15 分钟检查一次，过一会儿回来看看摘要效果。
 

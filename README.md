@@ -2,7 +2,7 @@
 
 **AI 驱动的网页变化监控工具** — 不只告诉你网页变了，还用 AI 告诉你变了什么。
 
-[在线体验](https://himself-push-leone-gap.trycloudflare.com) · [反馈建议](https://github.com/pxivory-max/dingsao/issues)
+[在线体验](https://martha-terminal-shows-opinions.trycloudflare.com) · [反馈建议](https://github.com/pxivory-max/dingsao/issues)
 
 ![Dashboard](docs/dashboard.png)
 
@@ -39,7 +39,7 @@
 
 ### 在线体验
 
-访问 https://himself-push-leone-gap.trycloudflare.com ，填入一个你关心的网址，15 分钟后看效果。
+访问 https://martha-terminal-shows-opinions.trycloudflare.com ，填入一个你关心的网址，15 分钟后看效果。
 
 ### 本地部署
 

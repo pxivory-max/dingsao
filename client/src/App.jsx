@@ -3,6 +3,21 @@ import './index.css'
 
 const API = '/api'
 
+// --- Simple Router ---
+function useRoute() {
+  const [path, setPath] = useState(window.location.pathname)
+  useEffect(() => {
+    const handler = () => setPath(window.location.pathname)
+    window.addEventListener('popstate', handler)
+    return () => window.removeEventListener('popstate', handler)
+  }, [])
+  const navigate = useCallback((to) => {
+    window.history.pushState(null, '', to)
+    setPath(to)
+  }, [])
+  return { path, navigate }
+}
+
 // --- Auth helpers ---
 function getToken() { return localStorage.getItem('dingsao_token') }
 function setToken(t) { if (t) localStorage.setItem('dingsao_token', t); else localStorage.removeItem('dingsao_token') }
@@ -25,6 +40,10 @@ function formatTime(t) {
   return d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
 }
 
+function formatDate(d) {
+  return new Date(d).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })
+}
+
 function StatusBadge({ status }) {
   const colors = {
     active: 'bg-green-100 text-green-700',
@@ -32,6 +51,20 @@ function StatusBadge({ status }) {
     error: 'bg-red-100 text-red-700'
   }
   return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${colors[status] || 'bg-gray-100'}`}>{status}</span>
+}
+
+function ImportanceBadge({ importance }) {
+  const styles = {
+    high: 'bg-red-100 text-red-700',
+    medium: 'bg-yellow-100 text-yellow-700',
+    low: 'bg-green-100 text-green-700'
+  }
+  const labels = { high: '重要', medium: '值得看', low: '一般' }
+  return <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${styles[importance] || 'bg-gray-100 text-gray-600'}`}>{labels[importance] || importance || '未知'}</span>
+}
+
+function TagBadge({ tag }) {
+  return <span className="px-1.5 py-0.5 rounded text-xs bg-blue-50 text-blue-600">{tag}</span>
 }
 
 // --- Auth Page ---
@@ -193,15 +226,32 @@ function AddMonitorDialog({ open, onClose, onCreated, editMonitor }) {
 // --- Change Detail Dialog ---
 function ChangeDetailDialog({ change, onClose }) {
   if (!change) return null
+  const tags = (() => {
+    try { return Array.isArray(change.tags) ? change.tags : JSON.parse(change.tags || '[]') } catch { return [] }
+  })()
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-white rounded-xl p-6 w-full max-w-2xl mx-4 shadow-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-        <h2 className="text-lg font-bold mb-2">变化详情</h2>
+        <div className="flex items-center gap-2 mb-2">
+          <h2 className="text-lg font-bold">变化详情</h2>
+          {change.importance && <ImportanceBadge importance={change.importance} />}
+        </div>
         <p className="text-sm text-gray-500 mb-4">{formatTime(change.detected_at)}</p>
         <div className="bg-blue-50 rounded-lg p-4 mb-4">
           <h3 className="text-sm font-semibold text-blue-800 mb-1">AI 摘要</h3>
           <p className="text-sm text-blue-700">{change.ai_summary || '无摘要'}</p>
         </div>
+        {change.pm_insight && (
+          <div className="bg-purple-50 rounded-lg p-4 mb-4">
+            <h3 className="text-sm font-semibold text-purple-800 mb-1">PM 洞察</h3>
+            <p className="text-sm text-purple-700">{change.pm_insight}</p>
+          </div>
+        )}
+        {tags.length > 0 && (
+          <div className="flex gap-1.5 flex-wrap mb-4">
+            {tags.map((tag, i) => <TagBadge key={i} tag={tag} />)}
+          </div>
+        )}
         {change.old_content && (
           <div className="mb-4">
             <h3 className="text-sm font-semibold text-gray-600 mb-1">旧内容（前500字）</h3>
@@ -259,7 +309,6 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
     setTesting(type)
     setTestResult(null)
     try {
-      // Save first
       await apiFetch('/settings/batch', {
         method: 'POST',
         body: JSON.stringify({ settings })
@@ -268,7 +317,7 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
         method: 'POST',
         body: JSON.stringify({ type })
       })
-      setTestResult(data && data.success ? { ok: true, msg: '✅ 发送成功！' } : { ok: false, msg: data?.error || '发送失败' })
+      setTestResult(data && data.success ? { ok: true, msg: '发送成功！' } : { ok: false, msg: data?.error || '发送失败' })
     } catch (e) {
       setTestResult({ ok: false, msg: e.message })
     } finally {
@@ -277,17 +326,15 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
   }
 
   const tabs = [
-    { key: 'feishu', label: '飞书 Webhook', icon: '🐦' },
-    { key: 'webhook', label: '通用 Webhook', icon: '🔗' },
-    { key: 'email', label: '邮件通知', icon: '✉️' }
+    { key: 'feishu', label: '飞书 Webhook', icon: '' },
+    { key: 'webhook', label: '通用 Webhook', icon: '' },
+    { key: 'email', label: '邮件通知', icon: '' }
   ]
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-white rounded-xl p-6 w-full max-w-lg mx-4 shadow-2xl" onClick={e => e.stopPropagation()}>
-        <h2 className="text-lg font-bold mb-4">⚙️ 通知设置</h2>
-
-        {/* Tabs */}
+        <h2 className="text-lg font-bold mb-4">通知设置</h2>
         <div className="flex border-b mb-4">
           {tabs.map(t => (
             <button
@@ -297,141 +344,203 @@ function SettingsDialog({ open, onClose, onSettingsChange }) {
                 tab === t.key ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
             >
-              {t.icon} {t.label}
+              {t.label}
             </button>
           ))}
         </div>
-
-        {/* Feishu Tab */}
         {tab === 'feishu' && (
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">飞书 Webhook URL</label>
-              <input
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx"
-                value={settings.feishu_webhook || ''}
-                onChange={e => update('feishu_webhook', e.target.value)}
-              />
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx" value={settings.feishu_webhook || ''} onChange={e => update('feishu_webhook', e.target.value)} />
               <p className="text-xs text-gray-400 mt-1">在飞书群添加自定义机器人，复制 Webhook 地址粘贴到此处</p>
             </div>
-            <button
-              onClick={() => handleTest('feishu')}
-              disabled={!settings.feishu_webhook || testing === 'feishu'}
-              className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {testing === 'feishu' ? '发送中...' : '📨 测试发送'}
+            <button onClick={() => handleTest('feishu')} disabled={!settings.feishu_webhook || testing === 'feishu'} className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              {testing === 'feishu' ? '发送中...' : '测试发送'}
             </button>
           </div>
         )}
-
-        {/* Webhook Tab */}
         {tab === 'webhook' && (
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">通用 Webhook URL</label>
-              <input
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="https://your-server.com/webhook"
-                value={settings.webhook_url || ''}
-                onChange={e => update('webhook_url', e.target.value)}
-              />
-              <p className="text-xs text-gray-400 mt-1">变化检测到后会 POST JSON 到该地址，包含 monitor_name, monitor_url, summary, detected_at</p>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="https://your-server.com/webhook" value={settings.webhook_url || ''} onChange={e => update('webhook_url', e.target.value)} />
             </div>
-            <div className="bg-gray-50 rounded-lg p-3">
-              <p className="text-xs font-medium text-gray-600 mb-1">POST Body 示例：</p>
-              <pre className="text-xs text-gray-500">{`{
-  "monitor_name": "竞品官网",
-  "monitor_url": "https://...",
-  "summary": "AI摘要内容",
-  "detected_at": "2026-04-15T12:00:00Z"
-}`}</pre>
-            </div>
-            <button
-              onClick={() => handleTest('webhook')}
-              disabled={!settings.webhook_url || testing === 'webhook'}
-              className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {testing === 'webhook' ? '发送中...' : '📨 测试发送'}
+            <button onClick={() => handleTest('webhook')} disabled={!settings.webhook_url || testing === 'webhook'} className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              {testing === 'webhook' ? '发送中...' : '测试发送'}
             </button>
           </div>
         )}
-
-        {/* Email Tab */}
         {tab === 'email' && (
           <div className="space-y-3">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">收件邮箱</label>
-              <input
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="your@email.com"
-                value={settings.email_to || ''}
-                onChange={e => update('email_to', e.target.value)}
-                type="email"
-              />
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="your@email.com" value={settings.email_to || ''} onChange={e => update('email_to', e.target.value)} type="email" />
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 服务器</label>
               <div className="grid grid-cols-3 gap-2">
-                <input
-                  className="col-span-2 border rounded-lg px-3 py-2 text-sm"
-                  placeholder="smtp.gmail.com"
-                  value={settings.smtp_host || ''}
-                  onChange={e => update('smtp_host', e.target.value)}
-                />
-                <input
-                  className="border rounded-lg px-3 py-2 text-sm"
-                  placeholder="587"
-                  value={settings.smtp_port || ''}
-                  onChange={e => update('smtp_port', e.target.value)}
-                  type="number"
-                />
+                <input className="col-span-2 border rounded-lg px-3 py-2 text-sm" placeholder="smtp.gmail.com" value={settings.smtp_host || ''} onChange={e => update('smtp_host', e.target.value)} />
+                <input className="border rounded-lg px-3 py-2 text-sm" placeholder="587" value={settings.smtp_port || ''} onChange={e => update('smtp_port', e.target.value)} type="number" />
               </div>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 用户名</label>
-              <input
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="your@gmail.com"
-                value={settings.smtp_user || ''}
-                onChange={e => update('smtp_user', e.target.value)}
-              />
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="your@gmail.com" value={settings.smtp_user || ''} onChange={e => update('smtp_user', e.target.value)} />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 密码 / 应用密码</label>
-              <input
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="应用专用密码"
-                value={settings.smtp_pass || ''}
-                onChange={e => update('smtp_pass', e.target.value)}
-                type="password"
-              />
-              <p className="text-xs text-gray-400 mt-1">Gmail 用户请使用「应用专用密码」，非账号密码</p>
+              <label className="block text-sm font-medium text-gray-700 mb-1">SMTP 密码</label>
+              <input className="w-full border rounded-lg px-3 py-2 text-sm" placeholder="应用专用密码" value={settings.smtp_pass || ''} onChange={e => update('smtp_pass', e.target.value)} type="password" />
             </div>
-            <button
-              onClick={() => handleTest('email')}
-              disabled={!settings.email_to || !settings.smtp_host || !settings.smtp_user || !settings.smtp_pass || testing === 'email'}
-              className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {testing === 'email' ? '发送中...' : '📨 测试发送'}
+            <button onClick={() => handleTest('email')} disabled={!settings.email_to || !settings.smtp_host || !settings.smtp_user || !settings.smtp_pass || testing === 'email'} className="w-full px-3 py-2 border border-blue-200 text-blue-600 rounded-lg text-sm hover:bg-blue-50 disabled:opacity-40 disabled:cursor-not-allowed">
+              {testing === 'email' ? '发送中...' : '测试发送'}
             </button>
           </div>
         )}
-
-        {/* Test result */}
         {testResult && (
           <div className={`mt-3 p-2 rounded-lg text-sm ${testResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
             {testResult.msg}
           </div>
         )}
-
         <div className="flex gap-2 pt-4">
           <button onClick={onClose} className="flex-1 px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">取消</button>
           <button onClick={handleSave} disabled={loading} className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50">
-            {saved ? '✅ 已保存' : loading ? '保存中...' : '保存'}
+            {saved ? '已保存' : loading ? '保存中...' : '保存'}
           </button>
         </div>
       </div>
+    </div>
+  )
+}
+
+// --- Daily Brief Page ---
+function DailyBriefPage({ navigate }) {
+  const [brief, setBrief] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [date, setDate] = useState(() => new Date().toISOString().split('T')[0])
+  const [showLow, setShowLow] = useState(false)
+  const [selectedChange, setSelectedChange] = useState(null)
+
+  const loadBrief = useCallback(async () => {
+    setLoading(true)
+    const data = await apiFetch(`/daily-brief?date=${date}`)
+    if (data && data.success) setBrief(data.data)
+    setLoading(false)
+  }, [date])
+
+  useEffect(() => { loadBrief() }, [loadBrief])
+
+  const loadChangeDetail = async (changeId) => {
+    const data = await apiFetch(`/changes/${changeId}`)
+    if (data && data.success) setSelectedChange(data.data)
+  }
+
+  const highChanges = brief?.changes?.filter(c => c.importance === 'high') || []
+  const mediumChanges = brief?.changes?.filter(c => c.importance === 'medium') || []
+  const lowChanges = brief?.changes?.filter(c => c.importance === 'low') || []
+  const totalCount = (brief?.counts?.high || 0) + (brief?.counts?.medium || 0) + (brief?.counts?.low || 0)
+
+  const ChangeCard = ({ change }) => {
+    const tags = Array.isArray(change.tags) ? change.tags : []
+    return (
+      <div onClick={() => loadChangeDetail(change.id)} className="bg-white rounded-lg border p-4 cursor-pointer hover:border-blue-300 transition-colors">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-xs text-gray-400 font-medium">{change.monitor_name}</span>
+              {tags.map((tag, i) => <TagBadge key={i} tag={tag} />)}
+            </div>
+            <p className="text-sm font-medium text-gray-900">{change.ai_summary || '(无摘要)'}</p>
+            {change.pm_insight && (
+              <p className="text-sm text-gray-500 mt-1">{change.pm_insight}</p>
+            )}
+          </div>
+          <a href={change.monitor_url} target="_blank" rel="noopener" onClick={e => e.stopPropagation()} className="text-xs text-blue-500 hover:underline shrink-0">原文</a>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-xl font-bold text-gray-900">你的 PM 简报 · {formatDate(date)}</h2>
+          {!loading && brief && (
+            <p className="text-sm text-gray-500 mt-1">
+              共 {totalCount} 条更新 — {brief.counts.high} 条重要 · {brief.counts.medium} 条值得看 · {brief.counts.low} 条一般
+            </p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <input type="date" value={date} onChange={e => setDate(e.target.value)} className="border rounded-lg px-3 py-1.5 text-sm" />
+          <button onClick={loadBrief} disabled={loading} className="px-4 py-1.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50">
+            {loading ? '加载中...' : '刷新'}
+          </button>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <p className="text-gray-400">加载简报中...</p>
+        </div>
+      ) : totalCount === 0 ? (
+        <div className="bg-white rounded-xl border p-12 text-center">
+          <p className="text-4xl mb-3">🌤</p>
+          <p className="text-lg font-medium text-gray-700">今日暂无变化</p>
+          <p className="text-sm text-gray-400 mt-1 mb-4">你监控的信息源今天还没有检测到更新</p>
+          <button onClick={() => navigate('/monitors')} className="px-5 py-2.5 border border-blue-200 text-blue-600 rounded-lg text-sm font-medium hover:bg-blue-50">
+            管理监控源
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {/* High importance */}
+          {highChanges.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-red-600 mb-3 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-red-500 inline-block"></span>
+                重要 ({highChanges.length})
+              </h3>
+              <div className="space-y-2">
+                {highChanges.map(c => <ChangeCard key={c.id} change={c} />)}
+              </div>
+            </div>
+          )}
+
+          {/* Medium importance */}
+          {mediumChanges.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-yellow-600 mb-3 flex items-center gap-1.5">
+                <span className="w-2 h-2 rounded-full bg-yellow-500 inline-block"></span>
+                值得看 ({mediumChanges.length})
+              </h3>
+              <div className="space-y-2">
+                {mediumChanges.map(c => <ChangeCard key={c.id} change={c} />)}
+              </div>
+            </div>
+          )}
+
+          {/* Low importance */}
+          {lowChanges.length > 0 && (
+            <div>
+              <button onClick={() => setShowLow(!showLow)} className="text-sm font-semibold text-green-600 mb-3 flex items-center gap-1.5 hover:text-green-700">
+                <span className="w-2 h-2 rounded-full bg-green-500 inline-block"></span>
+                一般更新 ({lowChanges.length})
+                <span className="text-xs font-normal text-gray-400">{showLow ? '点击收起' : '点击展开'}</span>
+              </button>
+              {showLow && (
+                <div className="space-y-2">
+                  {lowChanges.map(c => <ChangeCard key={c.id} change={c} />)}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      <ChangeDetailDialog change={selectedChange} onClose={() => setSelectedChange(null)} />
     </div>
   )
 }
@@ -485,7 +594,7 @@ function MonitorDetail({ monitor, onBack, onEdit }) {
               {monitor.selector && <span>选择器: <code className="bg-gray-100 px-1 rounded">{monitor.selector}</code></span>}
               <StatusBadge status={monitor.status} />
             </div>
-            {monitor.keywords && <p className="text-sm text-gray-500 mt-1">🌟 关键词: <span className="bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded text-xs">{monitor.keywords}</span></p>}
+            {monitor.keywords && <p className="text-sm text-gray-500 mt-1">关键词: <span className="bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded text-xs">{monitor.keywords}</span></p>}
             {monitor.error_message && <p className="text-sm text-red-500 mt-1">{monitor.error_message}</p>}
           </div>
           <div className="flex gap-2 shrink-0">
@@ -538,44 +647,20 @@ function MonitorDetail({ monitor, onBack, onEdit }) {
   )
 }
 
-// --- Notification Guide Banner ---
-function NotifyBanner({ onOpenSettings }) {
-  return (
-    <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-4 flex items-center justify-between">
-      <span className="text-sm text-amber-800">💡 配置通知后，有变化会自动推送给你</span>
-      <button onClick={onOpenSettings} className="text-sm text-amber-700 font-medium hover:text-amber-900 shrink-0 ml-3">去设置 →</button>
-    </div>
-  )
-}
-
-// --- Main App ---
-export default function App() {
-  const [user, setUser] = useState(null)
-  const [authChecked, setAuthChecked] = useState(false)
+// --- Monitors Page ---
+function MonitorsPage({ navigate }) {
   const [monitors, setMonitors] = useState([])
   const [stats, setStats] = useState(null)
   const [loading, setLoading] = useState(true)
   const [showAdd, setShowAdd] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
-  const [selectedMonitor, setSelectedMonitor] = useState(null)
   const [editingMonitor, setEditingMonitor] = useState(null)
+  const [selectedMonitor, setSelectedMonitor] = useState(null)
+  const [showSettings, setShowSettings] = useState(false)
   const [hasNotifyConfig, setHasNotifyConfig] = useState(true)
+  const [applyingTemplate, setApplyingTemplate] = useState(false)
+  const [templateResult, setTemplateResult] = useState(null)
 
-  // Check token on mount
-  useEffect(() => {
-    const token = getToken()
-    if (token) {
-      apiFetch('/auth/me').then(d => {
-        if (d && d.success) setUser(d.data)
-        else setToken(null)
-        setAuthChecked(true)
-      })
-    } else {
-      setAuthChecked(true)
-    }
-  }, [])
-
-  useEffect(() => { if (user) loadData() }, [user])
+  useEffect(() => { loadData() }, [])
 
   const loadData = async () => {
     setLoading(true)
@@ -600,11 +685,150 @@ export default function App() {
     loadData()
   }
 
+  const applyPmTemplates = async () => {
+    setApplyingTemplate(true)
+    setTemplateResult(null)
+    const data = await apiFetch('/monitors/pm-templates', { method: 'POST' })
+    if (data && data.success) {
+      setTemplateResult(data.data)
+      loadData()
+    }
+    setApplyingTemplate(false)
+    setTimeout(() => setTemplateResult(null), 5000)
+  }
+
+  if (selectedMonitor) {
+    return (
+      <div>
+        <MonitorDetail monitor={selectedMonitor} onBack={() => { setSelectedMonitor(null); loadData() }} onEdit={(m) => { setEditingMonitor(m); setShowAdd(true) }} />
+        <AddMonitorDialog open={showAdd} onClose={() => { setShowAdd(false); setEditingMonitor(null) }} editMonitor={editingMonitor} onCreated={(updated) => { setSelectedMonitor(updated); loadData() }} />
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {/* Sub header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-3">
+          <button onClick={applyPmTemplates} disabled={applyingTemplate} className="px-4 py-2 border border-purple-200 text-purple-600 rounded-lg text-sm font-medium hover:bg-purple-50 disabled:opacity-50">
+            {applyingTemplate ? '导入中...' : '应用 PM 模板'}
+          </button>
+          <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
+            + 添加监控
+          </button>
+        </div>
+        <button onClick={() => setShowSettings(true)} className="px-3 py-2 border rounded-lg text-sm hover:bg-gray-50" title="通知设置">设置</button>
+      </div>
+
+      {/* Template result */}
+      {templateResult && (
+        <div className="bg-purple-50 border border-purple-200 rounded-xl px-4 py-3 mb-4 text-sm text-purple-700">
+          已导入 {templateResult.added.length} 个监控
+          {templateResult.skipped.length > 0 && `，跳过 ${templateResult.skipped.length} 个已存在的`}
+        </div>
+      )}
+
+      {/* Notification Guide Banner */}
+      {!loading && !hasNotifyConfig && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl px-4 py-3 mb-4 flex items-center justify-between">
+          <span className="text-sm text-amber-800">配置通知后，有变化会自动推送给你</span>
+          <button onClick={() => setShowSettings(true)} className="text-sm text-amber-700 font-medium hover:text-amber-900 shrink-0 ml-3">去设置 →</button>
+        </div>
+      )}
+
+      {/* Stats */}
+      {stats && (
+        <div className="grid grid-cols-4 gap-3 mb-6">
+          {[
+            { label: '监控总数', value: stats.totalMonitors },
+            { label: '运行中', value: stats.activeMonitors },
+            { label: '总变化', value: stats.totalChanges },
+            { label: '24h 变化', value: stats.recentChanges }
+          ].map(s => (
+            <div key={s.label} className="bg-white rounded-xl border p-3 text-center">
+              <div className="text-2xl font-bold">{s.value}</div>
+              <div className="text-xs text-gray-500">{s.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Monitor List */}
+      {loading ? (
+        <p className="text-gray-400 text-center py-8">加载中...</p>
+      ) : monitors.length === 0 ? (
+        <div className="bg-white rounded-xl border p-12 text-center">
+          <p className="text-4xl mb-3">🔭</p>
+          <p className="text-lg font-medium text-gray-700">还没有监控任务</p>
+          <p className="text-sm text-gray-400 mt-1 mb-4">点击「应用 PM 模板」一键导入 12 个 AI/产品领域信息源</p>
+          <div className="flex gap-3 justify-center">
+            <button onClick={applyPmTemplates} disabled={applyingTemplate} className="px-5 py-2.5 border border-purple-200 text-purple-600 rounded-lg text-sm font-medium hover:bg-purple-50">
+              应用 PM 模板
+            </button>
+            <button onClick={() => setShowAdd(true)} className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
+              + 手动添加
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {monitors.map(m => (
+            <div key={m.id} onClick={() => setSelectedMonitor(m)} className="bg-white rounded-xl border p-4 cursor-pointer hover:border-blue-300 transition-colors group">
+              <div className="flex items-start justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium">{m.name}</span>
+                    <StatusBadge status={m.status} />
+                  </div>
+                  <p className="text-sm text-gray-400 truncate mt-0.5">{m.url}</p>
+                  <div className="flex gap-3 mt-1 text-xs text-gray-400">
+                    <span>频率: {m.frequency}分钟</span>
+                    <span>上次检查: {formatTime(m.last_check_at)}</span>
+                  </div>
+                </div>
+                <button onClick={(e) => deleteMonitor(m.id, e)} className="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity text-sm px-2">删除</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <AddMonitorDialog open={showAdd} onClose={() => { setShowAdd(false); setEditingMonitor(null) }} editMonitor={editingMonitor} onCreated={() => loadData()} />
+      <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} onSettingsChange={(s) => setHasNotifyConfig(!!(s.feishu_webhook || s.webhook_url || s.email_to))} />
+    </div>
+  )
+}
+
+// --- Main App ---
+export default function App() {
+  const { path, navigate } = useRoute()
+  const [user, setUser] = useState(null)
+  const [authChecked, setAuthChecked] = useState(false)
+
+  // Check token on mount
+  useEffect(() => {
+    const token = getToken()
+    if (token) {
+      apiFetch('/auth/me').then(d => {
+        if (d && d.success) setUser(d.data)
+        else setToken(null)
+        setAuthChecked(true)
+      })
+    } else {
+      setAuthChecked(true)
+    }
+  }, [])
+
+  // Redirect root to /daily
+  useEffect(() => {
+    if (user && (path === '/' || path === '')) {
+      navigate('/daily')
+    }
+  }, [user, path, navigate])
+
   const handleLogout = () => {
     setToken(null)
     setUser(null)
-    setMonitors([])
-    setStats(null)
   }
 
   if (!authChecked) {
@@ -612,19 +836,10 @@ export default function App() {
   }
 
   if (!user) {
-    return <AuthPage onLogin={(u) => setUser(u)} />
+    return <AuthPage onLogin={(u) => { setUser(u); navigate('/daily') }} />
   }
 
-  if (selectedMonitor) {
-    return (
-      <div className="min-h-screen bg-gray-50">
-        <div className="max-w-3xl mx-auto px-4 py-6">
-          <MonitorDetail monitor={selectedMonitor} onBack={() => { setSelectedMonitor(null); loadData() }} onEdit={(m) => { setEditingMonitor(m); setShowAdd(true) }} />
-          <AddMonitorDialog open={showAdd} onClose={() => { setShowAdd(false); setEditingMonitor(null) }} editMonitor={editingMonitor} onCreated={(updated) => { setSelectedMonitor(updated); loadData() }} />
-        </div>
-      </div>
-    )
-  }
+  const currentTab = path.startsWith('/monitors') ? 'monitors' : 'daily'
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -637,73 +852,41 @@ export default function App() {
           </div>
           <div className="flex items-center gap-3">
             <span className="text-sm text-gray-600">{user.name}</span>
-            <button onClick={() => setShowSettings(true)} className="px-3 py-2 border rounded-lg text-sm hover:bg-gray-50" title="设置">⚙️</button>
-            <button onClick={() => setShowAdd(true)} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
-              + 添加监控
-            </button>
             <button onClick={handleLogout} className="px-3 py-2 border rounded-lg text-sm text-gray-500 hover:bg-gray-50 hover:text-red-500" title="退出登录">退出</button>
           </div>
         </div>
 
-        {/* Notification Guide Banner */}
-        {!loading && !hasNotifyConfig && (
-          <NotifyBanner onOpenSettings={() => setShowSettings(true)} />
-        )}
+        {/* Navigation Tabs */}
+        <div className="flex border-b mb-6">
+          <button
+            onClick={() => navigate('/daily')}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              currentTab === 'daily'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            简报
+          </button>
+          <button
+            onClick={() => navigate('/monitors')}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              currentTab === 'monitors'
+                ? 'border-blue-600 text-blue-600'
+                : 'border-transparent text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            监控
+          </button>
+        </div>
 
-        {/* Stats */}
-        {stats && (
-          <div className="grid grid-cols-4 gap-3 mb-6">
-            {[
-              { label: '监控总数', value: stats.totalMonitors, color: 'blue' },
-              { label: '运行中', value: stats.activeMonitors, color: 'green' },
-              { label: '总变化', value: stats.totalChanges, color: 'purple' },
-              { label: '24h 变化', value: stats.recentChanges, color: 'orange' }
-            ].map(s => (
-              <div key={s.label} className="bg-white rounded-xl border p-3 text-center">
-                <div className="text-2xl font-bold">{s.value}</div>
-                <div className="text-xs text-gray-500">{s.label}</div>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* Monitor List */}
-        {loading ? (
-          <p className="text-gray-400 text-center py-8">加载中...</p>
-        ) : monitors.length === 0 ? (
-          <div className="bg-white rounded-xl border p-12 text-center">
-            <p className="text-4xl mb-3">🔭</p>
-            <p className="text-lg font-medium text-gray-700">还没有监控任务</p>
-            <p className="text-sm text-gray-400 mt-1 mb-4">试试添加一个你经常刷的网页，比如竞品官网、招聘页面、行业论坛</p>
-            <button onClick={() => setShowAdd(true)} className="px-5 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 shadow-sm">
-              + 添加第一个监控
-            </button>
-          </div>
+        {/* Page Content */}
+        {currentTab === 'daily' ? (
+          <DailyBriefPage navigate={navigate} />
         ) : (
-          <div className="space-y-2">
-            {monitors.map(m => (
-              <div key={m.id} onClick={() => setSelectedMonitor(m)} className="bg-white rounded-xl border p-4 cursor-pointer hover:border-blue-300 transition-colors group">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{m.name}</span>
-                      <StatusBadge status={m.status} />
-                    </div>
-                    <p className="text-sm text-gray-400 truncate mt-0.5">{m.url}</p>
-                    <div className="flex gap-3 mt-1 text-xs text-gray-400">
-                      <span>频率: {m.frequency}分钟</span>
-                      <span>上次检查: {formatTime(m.last_check_at)}</span>
-                    </div>
-                  </div>
-                  <button onClick={(e) => deleteMonitor(m.id, e)} className="text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity text-sm px-2">删除</button>
-                </div>
-              </div>
-            ))}
-          </div>
+          <MonitorsPage navigate={navigate} />
         )}
       </div>
-      <AddMonitorDialog open={showAdd} onClose={() => { setShowAdd(false); setEditingMonitor(null) }} editMonitor={editingMonitor} onCreated={() => loadData()} />
-      <SettingsDialog open={showSettings} onClose={() => setShowSettings(false)} onSettingsChange={(s) => setHasNotifyConfig(!!(s.feishu_webhook || s.webhook_url || s.email_to))} />
     </div>
   )
 }

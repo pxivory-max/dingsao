@@ -44,7 +44,7 @@
 
 ## 体验地址
 
-https://himself-push-leone-gap.trycloudflare.com
+https://martha-terminal-shows-opinions.trycloudflare.com
 
 免费体验，无需注册。
 

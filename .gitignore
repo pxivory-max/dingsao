@@ -6,3 +6,6 @@ client/node_modules/
 *.db-shm
 *.db-wal
 *.db-journal
+
+.env.*
+!.env.example

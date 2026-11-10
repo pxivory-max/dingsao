@@ -1,7 +1,8 @@
+const mailboxPassword = require('./mail-config').password;
 const { chromium } = require('playwright');
 
 const EMAIL = 'xiaowceo2026@deltajohnsons.com';
-const EMAIL_PASSWORD = 'Hackfest2026Pass!';
+const EMAIL_PASSWORD = mailboxPassword;
 
 (async () => {
   const browser = await chromium.launch({ headless: true });

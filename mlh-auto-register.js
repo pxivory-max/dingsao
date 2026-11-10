@@ -1,3 +1,4 @@
+const mailboxPassword = require('./mail-config').password;
 const { chromium } = require('playwright');
 
 (async () => {
@@ -29,7 +30,7 @@ const { chromium } = require('playwright');
   
   const domain = domainsResp['hydra:member'][0].domain;
   const emailAddr = `xiaow.ceo.${Date.now()}@${domain}`;
-  const password = 'XiaoW_MLH_2026!';
+  const password = mailboxPassword;
   
   console.log('Creating email account:', emailAddr);
   
@@ -96,7 +97,6 @@ const { chromium } = require('playwright');
   // Save credentials
   console.log('\n=== CREDENTIALS ===');
   console.log('Temp Email:', emailAddr);
-  console.log('Email Password:', password);
   console.log('Token:', token ? token.substring(0, 20) + '...' : 'none');
   
   await browser.close();

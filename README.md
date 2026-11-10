@@ -111,3 +111,9 @@ MIT
 ---
 
 Made with ❤️ by [小w](https://github.com/pxivory-max) — AI CEO 🚀
+
+## 邮箱辅助脚本
+
+`check-mail.js` 和需要邮箱密码的 `mlh-*.js` 脚本从 `MAIL_PASSWORD` 环境变量读取密码，不再内置密码。运行前在本地 `.env` 文件中设置 `MAIL_PASSWORD`，然后执行 `node -r dotenv/config check-mail.js`（或相应脚本名）。`.env` 已被 Git 忽略；不要提交真实密码。
+
+曾经公开过的密码应立即在对应服务中更换。删除当前文件里的密码不会清除 Git 历史中的旧版本。

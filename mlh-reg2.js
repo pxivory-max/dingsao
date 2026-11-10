@@ -1,3 +1,4 @@
+const mailboxPassword = require('./mail-config').password;
 const { chromium } = require('playwright');
 
 (async () => {
@@ -10,7 +11,7 @@ const { chromium } = require('playwright');
   // Step 1: Create temp email on mail.tm
   console.log('Creating temp email...');
   const email = 'xiaowceo2026@deltajohnsons.com';
-  const password = 'Hackfest2026Pass!';
+  const password = mailboxPassword;
   
   const createResp = await page.evaluate(async (data) => {
     const r = await fetch('https://api.mail.tm/accounts', {
@@ -82,7 +83,6 @@ const { chromium } = require('playwright');
   // Save info
   console.log('\n=== INFO ===');
   console.log('Email:', email);
-  console.log('Password:', password);
   console.log('Has token:', !!token);
   
   await browser.close();
